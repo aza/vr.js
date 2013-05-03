@@ -16,34 +16,20 @@ A codeless kernel extension is required to disable the system HID drivers from t
 
 Installing:
 
-* Unplug your Rift from USB
 * Execute `sudo ./experimental/install-usb-hack.sh`
-* Plug your Rift back in
 
-To verify it worked run `ioreg -b -f | grep -n5 Tracker` and ensure that it does not have an HID interfaces nested underneath it. You should see output similar to the following:
+Uninstalling:
 
-```
-+-o Tracker DK@14200000  <class IOUSBDevice, id 0x100000583, registered, matched, active, busy 0 (61 ms), retain 11>
-  +-o AppleUSBComposite  <class AppleUSBComposite, id 0x100000586, !registered, !matched, active, busy 0, retain 4>
-  +-o IOUSBInterface@0  <class IOUSBInterface, id 0x10000058a, registered, matched, active, busy 0 (11 ms), retain 10>
-    +-o IOService  <class IOService, id 0x10000058d, !registered, !matched, active, busy 0, retain 4>
-```
-
-To uninstall, execute `sudo ./experimental/uninstall-usb-hack.sh`.
+* Execute `sudo ./experimental/uninstall-usb-hack.sh`
 
 ### Linux
 
 A custom device rule that acts to unbind the Rift from the USB HID driver every time its plugged in is required.
 
-* Unplug your Rift from USB
-* `sudo nano /lib/udev/rules.d/40-oculus.rules`
-* Add the following contents to the file:
-```
-SUBSYSTEM=="usb", ATTR{idVendor}=="2833", ATTRS{idProduct}=="0001", MODE="0664", GROUP="plugdev", PROGRAM="/bin/sh -c 'echo -n $id:1.0 >/sys/bus/usb/drivers/usbhid/unbind'"
-```
-* `sudo service udev restart`
-* Plug your Rift back in
+Installing:
 
-To verify it worked run `usb-devices`, look for the 'Tracker', and confirm that `Driver=(none)`.
+* Execute `sudo ./experimental/install-usb-hack.sh`
 
-To uninstall simply delete the `/lib/udev/rules.d/40-oculus.rules` file and restart the udev service.
+Uninstalling:
+
+* Execute `sudo ./experimental/uninstall-usb-hack.sh`
