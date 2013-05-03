@@ -100,24 +100,3 @@ http://www.beyondlogic.org/usbnutshell/usb6.shtml
 
 http://developer.chrome.com/apps/app_hardware.html
 http://developer.chrome.com/apps/usb.html
-
-linux:
-unplug
-sudo nano /lib/udev/rules.d/40-oculus.rules
-SUBSYSTEM=="usb", ATTR{idVendor}=="2833", ATTRS{idProduct}=="0001", MODE="0664", GROUP="plugdev", PROGRAM="/bin/sh -c 'echo -n $id:1.0 >/sys/bus/usb/drivers/usbhid/unbind'"
-sudo service udev restart
-replug
-usb-devices
-confirm Driver=(none)
-
-osx:
-unplug
-./experimental/install-usb-hack.sh
-replug
-ioreg -b -f | grep -n5 Tracker
-expect:
-  295:    | | | |   +-o Tracker DK@14200000  <class IOUSBDevice, id 0x100000583, registered, matched, active, busy 0 (61 ms), retain 11>
-  296-    | | | |     +-o AppleUSBComposite  <class AppleUSBComposite, id 0x100000586, !registered, !matched, active, busy 0, retain 4>
-  297-    | | | |     +-o IOUSBInterface@0  <class IOUSBInterface, id 0x10000058a, registered, matched, active, busy 0 (11 ms), retain 10>
-  298-    | | | |     | +-o IOService  <class IOService, id 0x10000058d, !registered, !matched, active, busy 0, retain 4>
-  299-    | | | |     | +-o IOUSBInterfaceUserClientV3  <class IOUSBInterfaceUserClientV3, id 0x1000005a6, !registered, !matched, active, busy 0, retain 8>
