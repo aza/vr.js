@@ -729,10 +729,36 @@ SensorFilter.prototype.getMean = function(out) {
   out[1] /= this.Size;
   out[2] /= this.Size;
 };
-
-
-var ROTATION_QUAT = new Float32Array([0, 0, 0, 1]);
-
+SensorFilter.prototype.getSavitzkyGolaySmooth8 = function(out) {
+  this.getPrev(0, tempVec3);
+  out[0] += tempVec3[0] * 0.41667;
+  out[1] += tempVec3[1] * 0.41667;
+  out[2] += tempVec3[2] * 0.41667;
+  this.getPrev(1, tempVec3);
+  out[0] += tempVec3[0] * 0.33333;
+  out[1] += tempVec3[1] * 0.33333;
+  out[2] += tempVec3[2] * 0.33333;
+  this.getPrev(2, tempVec3);
+  out[0] += tempVec3[0] * 0.25;
+  out[1] += tempVec3[1] * 0.25;
+  out[2] += tempVec3[2] * 0.25;
+  this.getPrev(3, tempVec3);
+  out[0] += tempVec3[0] * 0.1667;
+  out[1] += tempVec3[1] * 0.1667;
+  out[2] += tempVec3[2] * 0.1667;
+  this.getPrev(4, tempVec3);
+  out[0] += tempVec3[0] * 0.08333;
+  out[1] += tempVec3[1] * 0.08333;
+  out[2] += tempVec3[2] * 0.08333;
+  this.getPrev(6, tempVec3);
+  out[0] -= tempVec3[0] * 0.08333;
+  out[1] -= tempVec3[1] * 0.08333;
+  out[2] -= tempVec3[2] * 0.08333;
+  this.getPrev(7, tempVec3);
+  out[0] -= tempVec3[0] * 0.1667;
+  out[1] -= tempVec3[1] * 0.1667;
+  out[2] -= tempVec3[2] * 0.1667;
+};
 
 var SensorFusion = function() {
   this.Q = new Float32Array([0, 0, 0, 1]);
@@ -759,20 +785,6 @@ var SensorFusion = function() {
 };
 var tempQuat0 = new Float32Array(4);
 var tempQuat1 = new Float32Array(4);
-var tempQuat2 = new Float32Array(4);
-// TODO: vec3.transformQuat
-quat.rotate = function(out, a, v) {
-  tempQuat0[0] = v[0];
-  tempQuat0[1] = v[1];
-  tempQuat0[2] = v[2];
-  tempQuat0[0] = 0;
-  quat.multiply(tempQuat0, a, tempQuat0);
-  quat.invert(tempQuat1, a);
-  quat.multiply(tempQuat0, tempQuat0, tempQuat1);
-  out[0] = tempQuat0[0];
-  out[1] = tempQuat0[1];
-  out[2] = tempQuat0[2];
-};
 var tempVec3 = new Float32Array(3);
 vec3.angle = function(a, b) {
   return Math.acos(vec3.dot(a, b) / (vec3.length(a) * vec3.length(b)));
@@ -783,7 +795,7 @@ SensorFusion.prototype.handleSensorData = function(sensors) {
   var rawAccel = sensors.acceleration;
   var mag = sensors.magneticField;
 
-  vec3.copy(this.AngV, angVel);
+  vec3.copy(this.AngV, sensors.rotationRate);
   this.AngV[1] *= this.YawMult;
   this.A = rawAccel;
 
@@ -795,7 +807,7 @@ SensorFusion.prototype.handleSensorData = function(sensors) {
   var accLength = vec3.length(rawAccel);
 
   var accWorld = new Float32Array(3);
-  quat.rotate(accWorld, this.Q, rawAccel);
+  vec3.transformQuat(accWorld, rawAccel, this.Q);
 
   this.Stage++;
   var currentTime = this.State * deltaT;
@@ -819,7 +831,19 @@ SensorFusion.prototype.handleSensorData = function(sensors) {
 
     quat.copy(this.QP, this.Q);
     if (this.EnablePrediction) {
-      // TODO
+      var angVelF = new Float32Array(3);
+      this.FAngV.getSavitzkyGolaySmooth8(angVelF);
+      var angVelFL = vec3.length(angVelF);
+      if (angVelFL > 0.001) {
+        var rotAxisP = angVelF;
+        vec3.scale(rotAxisP, angVelF, 1 / angVelFL);
+        var halfRotAngleP = angVelFL * this.PredictionDT * 0.5;
+        var sinaHRAP = Math.sin(halfRotAngleP);
+        quat.set(tempQuat0,
+            rotAxisP[0] * sinaHRAP, rotAxisP[1] * sinaHRAP,
+            rotAxisP[2] * sinaHRAP, Math.cos(halfRotAngleP));
+        quat.multiply(this.QP, this.Q, tempQuat0);
+      }
     }
   }
 
@@ -874,13 +898,6 @@ SensorFusion.prototype.handleSensorData = function(sensors) {
       }
     }
   }
-
-  // statusEl.innerHTML = [
-  //   this.Q[0],
-  //   this.Q[1],
-  //   this.Q[2],
-  //   this.Q[3]
-  // ].join('<br>');
 };
 SensorFusion.prototype.reset = function() {
   quat.identity(this.Q);
@@ -931,7 +948,7 @@ function startInputPump(device, deviceDesc, reportDesc) {
         result[2] = ((result[2] << 11) >> 11);
         return result;
       };
-      var AS = 10;
+      var AS = 1;
       var ES = 10;
       function accelFromBodyFrameUpdate(message, n) {
         return new Float32Array([
@@ -1043,3 +1060,5 @@ function pumpInput(device, endpointAddress, reportSize, callback) {
   });
 };
 
+
+window.__vr_driver__ = {};
