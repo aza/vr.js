@@ -694,6 +694,201 @@ var HidReportDescriptor = function(data) {
   }
 };
 
+var SensorFilter = function(size) {
+  this.LastIdx = -1;
+  this.Size = size;
+  this.Elements = new Float32Array(size * 3);
+};
+SensorFilter.prototype.addElement = function(v) {
+  if (this.LastIdx == this.Size - 1) {
+    this.LastIdx = 0;
+  } else {
+    this.LastIdx++;
+  }
+  this.Elements[this.LastIdx * 3 + 0] = v[0];
+  this.Elements[this.LastIdx * 3 + 1] = v[1];
+  this.Elements[this.LastIdx * 3 + 2] = v[2];
+};
+SensorFilter.prototype.getPrev = function(i, out) {
+  var idx = (this.LastIdx - i) % this.Size;
+  if (idx < 0) {
+    idx += this.Size;
+  }
+  out[0] = this.Elements[idx * 3 + 0];
+  out[1] = this.Elements[idx * 3 + 1];
+  out[2] = this.Elements[idx * 3 + 2];
+};
+SensorFilter.prototype.getMean = function(out) {
+  out[0] = out[1] = out[2] = 0;
+  for (var n = 0; n < this.Size; n++) {
+    out[0] += this.Elements[n * 3 + 0];
+    out[1] += this.Elements[n * 3 + 1];
+    out[2] += this.Elements[n * 3 + 2];
+  }
+  out[0] /= this.Size;
+  out[1] /= this.Size;
+  out[2] /= this.Size;
+};
+
+
+var ROTATION_QUAT = new Float32Array([0, 0, 0, 1]);
+
+
+var SensorFusion = function() {
+  this.Q = new Float32Array([0, 0, 0, 1]);
+  this.A = new Float32Array(3);
+  this.AngV = new Float32Array(3);
+  this.Mag = new Float32Array(3);
+  this.RawMag = new Float32Array(3);
+  this.Stage = 0;
+  this.Gain = 0.05;
+  this.YawMult = 1;
+  this.EnableGravity = true;
+
+  this.EnablePrediction = false;
+  this.PredictionDT = 0.03;
+  this.QP = new Float32Array([0, 0, 0, 1]);
+
+  this.FMag = new SensorFilter(10);
+  this.FAccW = new SensorFilter(20);
+  this.FAngV = new SensorFilter(20);
+
+  this.TiltCondCount = 0;
+  this.TiltErrorAngle = 0;
+  this.TiltErrorAxis = new Float32Array([0, 1, 0]);
+};
+var tempQuat0 = new Float32Array(4);
+var tempQuat1 = new Float32Array(4);
+var tempQuat2 = new Float32Array(4);
+// TODO: vec3.transformQuat
+quat.rotate = function(out, a, v) {
+  tempQuat0[0] = v[0];
+  tempQuat0[1] = v[1];
+  tempQuat0[2] = v[2];
+  tempQuat0[0] = 0;
+  quat.multiply(tempQuat0, a, tempQuat0);
+  quat.invert(tempQuat1, a);
+  quat.multiply(tempQuat0, tempQuat0, tempQuat1);
+  out[0] = tempQuat0[0];
+  out[1] = tempQuat0[1];
+  out[2] = tempQuat0[2];
+};
+var tempVec3 = new Float32Array(3);
+vec3.angle = function(a, b) {
+  return Math.acos(vec3.dot(a, b) / (vec3.length(a) * vec3.length(b)));
+};
+SensorFusion.prototype.handleSensorData = function(sensors) {
+  var deltaT = sensors.timeDelta;
+  var angVel = sensors.rotationRate;
+  var rawAccel = sensors.acceleration;
+  var mag = sensors.magneticField;
+
+  vec3.copy(this.AngV, angVel);
+  this.AngV[1] *= this.YawMult;
+  this.A = rawAccel;
+
+  vec3.copy(this.RawMag, mag);
+  // if has mag cal, mult mag matrix
+  vec3.copy(this.Mag, mag);
+
+  var angVelLength = vec3.length(angVel);
+  var accLength = vec3.length(rawAccel);
+
+  var accWorld = new Float32Array(3);
+  quat.rotate(accWorld, this.Q, rawAccel);
+
+  this.Stage++;
+  var currentTime = this.State * deltaT;
+
+  this.FMag.addElement(mag);
+  this.FAccW.addElement(accWorld);
+  this.FAngV.addElement(angVel);
+
+  if (angVelLength > 0) {
+    var rotAxis = new Float32Array(3);
+    vec3.scale(rotAxis, angVel, 1 / angVelLength);
+    var halfRotAngle = angVelLength * deltaT * 0.5;
+    var sinHRA = Math.sin(halfRotAngle);
+    var deltaQ = new Float32Array(4);
+    deltaQ[0] = rotAxis[0] * sinHRA;
+    deltaQ[1] = rotAxis[1] * sinHRA;
+    deltaQ[2] = rotAxis[2] * sinHRA;
+    deltaQ[3] = Math.cos(halfRotAngle);
+
+    quat.multiply(this.Q, this.Q, deltaQ);
+
+    quat.copy(this.QP, this.Q);
+    if (this.EnablePrediction) {
+      // TODO
+    }
+  }
+
+  if (this.Stage % 5000 == 0) {
+    quat.normalize(this.Q, this.Q);
+  }
+
+  if (this.EnableGravity) {
+    var gravityEpsilon = 0.4;
+    var angVelEpsilon = 0.1;
+    var tiltPeriod = 50;
+    var maxTiltError = 0.05;
+    var minTiltError = 0.01;
+    if ((Math.abs(accLength - 9.81) < gravityEpsilon) &&
+        (angVelLength < angVelEpsilon)) {
+      this.TiltCondCount++;
+    } else {
+      this.TiltCondCount = 0;
+    }
+
+    if (this.TiltCondCount >= tiltPeriod) {
+      this.TiltCondCount = 0;
+      var accWMean = new Float32Array(3);
+      this.FAccW.getMean(accWMean);
+      var xzAcc = new Float32Array(3);
+      xzAcc[0] = accWMean[0];
+      xzAcc[1] = 0;
+      xzAcc[2] = accWMean[2];
+      var tiltAxis = new Float32Array(3);
+      tiltAxis[0] = xzAcc[2];
+      tiltAxis[1] = 0;
+      tiltAxis[2] = -xzAcc[0];
+      vec3.normalize(tiltAxis, tiltAxis);
+      var yUp = new Float32Array([0, 1, 0]);
+      var tiltAngle = vec3.angle(yUp, accWMean);
+      if (tiltAngle > maxTiltError) {
+        this.TiltErrorAngle = tiltAngle;
+        this.TiltErrorAxis = tiltAxis;
+      }
+    }
+
+    if (this.TiltErrorAngle > minTiltError) {
+      if (this.TiltErrorAngle > 0.4 && this.Stage < 2000) {
+        quat.setAxisAngle(tempQuat0, this.TiltErrorAxis, -this.TiltErrorAngle);
+        quat.multiply(this.Q, tempQuat0, this.Q);
+        this.TiltErrorAngle = 0;
+      } else {
+        var deltaTiltAngle = -this.Gain * this.TiltErrorAngle * 0.005 * (5 * angVelLength + 1);
+        quat.setAxisAngle(tempQuat0, this.TiltErrorAxis, deltaTiltAngle);
+        quat.multiply(this.Q, tempQuat0, this.Q);
+        this.TiltErrorAngle += deltaTiltAngle;
+      }
+    }
+  }
+
+  // statusEl.innerHTML = [
+  //   this.Q[0],
+  //   this.Q[1],
+  //   this.Q[2],
+  //   this.Q[3]
+  // ].join('<br>');
+};
+SensorFusion.prototype.reset = function() {
+  quat.identity(this.Q);
+};
+
+var sensorFusion = new SensorFusion();
+
+
 function startInputPump(device, deviceDesc, reportDesc) {
   var interfaceNumber = deviceDesc.configurations[0].interfaces[0].interfaceNumber;
   chrome.usb.claimInterface(device, interfaceNumber, function() {
@@ -714,12 +909,7 @@ function startInputPump(device, deviceDesc, reportDesc) {
     var TIME_UNIT = 1 / 1000;
 
     function handleSensorData(sensors) {
-      // TODO: pass to sensor fusion code
-      statusEl.innerHTML = [
-        sensors.acceleration[0],
-        sensors.acceleration[1],
-        sensors.acceleration[2]
-      ].join('<br>');
+      sensorFusion.handleSensorData(sensors);
     };
 
     pumpInput(device, endpointAddress, reportSize, function(data) {
@@ -741,18 +931,20 @@ function startInputPump(device, deviceDesc, reportDesc) {
         result[2] = ((result[2] << 11) >> 11);
         return result;
       };
+      var AS = 10;
+      var ES = 10;
       function accelFromBodyFrameUpdate(message, n) {
         return new Float32Array([
-          message.samples[n].accel[0] * 0.0001,
-          message.samples[n].accel[1] * 0.0001,
-          message.samples[n].accel[2] * 0.0001
+          message.samples[n].accel[0] * 0.0001 * AS,
+          message.samples[n].accel[1] * 0.0001 * AS,
+          message.samples[n].accel[2] * 0.0001 * AS
         ]);
       };
       function eulerFromBodyFrameUpdate(message, n) {
         return new Float32Array([
-          message.samples[n].gyro[0] * 0.0001,
-          message.samples[n].gyro[1] * 0.0001,
-          message.samples[n].gyro[2] * 0.0001
+          message.samples[n].gyro[0] * 0.0001 * ES,
+          message.samples[n].gyro[1] * 0.0001 * ES,
+          message.samples[n].gyro[2] * 0.0001 * ES
         ]);
       };
       function magFromBodyFrameUpdate(message) {

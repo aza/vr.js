@@ -52,8 +52,8 @@ chrome.app.runtime.onLaunched.addListener(function() {
 
     // Spin up the demo.
     chrome.app.window.create('demo.html', {
-      'width': 400,
-      'height': 500
+      'width': 800,
+      'height': 600
     }, function(childWindow) {
       //
     });
