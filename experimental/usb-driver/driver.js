@@ -6,6 +6,8 @@
  */
 
 
+(function(global) {
+
 var assert = this.assert ||
     function() { console.assert.apply(console, arguments); };
 
@@ -440,8 +442,11 @@ function queryDevice(device) {
         }
         console.log('config set');
 
+        global.__vr_driver__.hmdDeviceDesc = deviceDesc;
+
         HmdInfo.get(device, deviceDesc, function(info) {
           console.log(info);
+          global.__vr_driver__.hmdInfo = info;
         });
 
         getSensorConfig(device, deviceDesc, function(data) {
@@ -1061,4 +1066,13 @@ function pumpInput(device, endpointAddress, reportSize, callback) {
 };
 
 
-window.__vr_driver__ = {};
+global.__vr_driver__ = {
+  hmdDeviceDesc: null,
+  hmdInfo: null,
+  rotation: sensorFusion.Q,
+  reset: function() {
+    sensorFusion.reset();
+  }
+};
+
+})(window);
