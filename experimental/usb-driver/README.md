@@ -33,3 +33,9 @@ Installing:
 Uninstalling:
 
 * Execute `sudo ./experimental/uninstall-usb-hack.sh`
+
+## Preparing the Demo
+
+* Execute `./experimental/usb-driver/setup.sh` to copy files.
+* Load the `experimental/usb-driver` unpacked extension from chrome://extensions
+* Launch!
