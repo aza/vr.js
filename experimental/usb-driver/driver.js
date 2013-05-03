@@ -526,7 +526,7 @@ var HidReportDescriptor = function(data) {
       if (itemType == 0) {
         switch (itemTag) {
           case 0x8: // input
-            console.log('input', itemSize);
+            //console.log('input', itemSize);
             currentReport.inputs.push({
               usage: usage,
               logicalMin: logicalMin,
@@ -536,7 +536,7 @@ var HidReportDescriptor = function(data) {
             });
             break;
           case 0x9: // output
-            console.log('output', itemSize);
+            //console.log('output', itemSize);
             currentReport.outputs.push({
               usage: usage,
               logicalMin: logicalMin,
@@ -546,7 +546,7 @@ var HidReportDescriptor = function(data) {
             });
             break;
           case 0xB: // feature
-            console.log('feature', itemSize);
+            //console.log('feature', itemSize);
             currentReport.features.push({
               usage: usage,
               logicalMin: logicalMin,
@@ -571,50 +571,50 @@ var HidReportDescriptor = function(data) {
               case 0x05: collectionName = 'usageSwitch'; break;
               case 0x06: collectionName = 'usageModifier'; break;
             }
-            console.log('collection', collectionName);
+            //console.log('collection', collectionName);
             current[collectionName] = child;
             current = child;
             break;
           case 0xC: // end collection
-          console.log('end collection');
+          //console.log('end collection');
             current = stack.pop();
             break;
           default:
-            console.log('unknown type 0', itemTag);
+            //console.log('unknown type 0', itemTag);
             break;
         }
       } else if (itemType == 1) {
         switch (itemTag) {
           case 0x0: // usage page
             usagePage = readData(itemSize, data, o);
-            console.log('usage page', usagePage.toString(16));
+            //console.log('usage page', usagePage.toString(16));
             break;
           case 0x1: // logical minimum
             logicalMin = readData(itemSize, data, o);
-            console.log('logical minimum', logicalMin);
+            //console.log('logical minimum', logicalMin);
             break;
           case 0x2: // logical maximum
             logicalMax = readData(itemSize, data, o);
-            console.log('logical maximum', logicalMax);
+            //console.log('logical maximum', logicalMax);
             break;
           case 0x3: // physical minimum
-            console.log('physical minimum', readData(itemSize, data, o));
+            //console.log('physical minimum', readData(itemSize, data, o));
             break;
           case 0x4: // physical maximum
-            console.log('physical maximum', readData(itemSize, data, o));
+            //console.log('physical maximum', readData(itemSize, data, o));
             break;
           case 0x5: // unit exponent
-            console.log('unit exponent', readData(itemSize, data, o));
+            //console.log('unit exponent', readData(itemSize, data, o));
             break;
           case 0x6: // unit
-            console.log('unit', readData(itemSize, data, o));
+            //console.log('unit', readData(itemSize, data, o));
             break;
           case 0x7: // report size
             reportSize = readData(itemSize, data, o);
-            console.log('report size', reportSize);
+            //console.log('report size', reportSize);
             break;
           case 0x8: // report id
-            console.log('report id', readData(itemSize, data, o));
+            //console.log('report id', readData(itemSize, data, o));
             currentReport = {
               reportId: readData(itemSize, data, o),
               inputs: [],
@@ -626,57 +626,57 @@ var HidReportDescriptor = function(data) {
             break;
           case 0x9: // report count
             reportCount = readData(itemSize, data, o);
-            console.log('report count', reportCount);
+            //console.log('report count', reportCount);
             break;
           case 0xA: // push
-            console.log('push');
+            //console.log('push');
             break;
           case 0xB: // pop
-            console.log('pop');
+            //console.log('pop');
             break;
           default:
-            console.log('unknown type 1', itemTag);
+            //console.log('unknown type 1', itemTag);
             break;
         }
       } else if (itemType == 2) {
         switch (itemTag) {
           case 0x0: // usage
             usage = (usagePage << 16) | readData(itemSize, data, o);
-            console.log('usage', usage);
+            //console.log('usage', usage);
             break;
           case 0x1: // usage minimum
-            console.log('usage minimum', readData(itemSize, data, o));
+            //console.log('usage minimum', readData(itemSize, data, o));
             break;
           case 0x2: // usage maximum
-            console.log('usage maximum', readData(itemSize, data, o));
+            //console.log('usage maximum', readData(itemSize, data, o));
             break;
           case 0x3: // designator index
-            console.log('designator index', readData(itemSize, data, o));
+            //console.log('designator index', readData(itemSize, data, o));
             break;
           case 0x4: // designator minimum
-            console.log('usage minimum', readData(itemSize, data, o));
+            //console.log('usage minimum', readData(itemSize, data, o));
             break;
           case 0x5: // designator maximum
-            console.log('usage maximum', readData(itemSize, data, o));
+            //console.log('usage maximum', readData(itemSize, data, o));
             break;
           case 0x7: // string index
-            console.log('string index', readData(itemSize, data, o));
+            //console.log('string index', readData(itemSize, data, o));
             break;
           case 0x8: // string minimum
-            console.log('string minimum', readData(itemSize, data, o));
+            //console.log('string minimum', readData(itemSize, data, o));
             break;
           case 0x9: // string maximum
-            console.log('string maximum', readData(itemSize, data, o));
+            //console.log('string maximum', readData(itemSize, data, o));
             break;
           case 0xA: // delimiter
-            console.log('delimiter', readData(itemSize, data, o));
+            //console.log('delimiter', readData(itemSize, data, o));
             break;
           default:
-            console.log('unknown type 2', itemTag);
+            //console.log('unknown type 2', itemTag);
             break;
         }
       } else {
-        console.log('unknown type ' + itemType);
+        //console.log('unknown type ' + itemType);
       }
       o += itemSize;
     }
@@ -704,7 +704,24 @@ function startInputPump(device, deviceDesc, reportDesc) {
     var inputReport = reportDesc.root.application.logical.reports[0];
     var reportSize = inputReport.totalSize + 1;
 
-    var nn = 0;
+    var lastTimestamp = 0;
+    var lastSampleCount = 0;
+    var lastAcceleration = new Float32Array(3);
+    var lastRotationRate = new Float32Array(3);
+    var lastMagneticField = new Float32Array(3);
+    var lastTemperature = 0;
+
+    var TIME_UNIT = 1 / 1000;
+
+    function handleSensorData(sensors) {
+      // TODO: pass to sensor fusion code
+      statusEl.innerHTML = [
+        sensors.acceleration[0],
+        sensors.acceleration[1],
+        sensors.acceleration[2]
+      ].join('<br>');
+    };
+
     pumpInput(device, endpointAddress, reportSize, function(data) {
       //console.log('incoming data', !!data);
 
@@ -724,9 +741,28 @@ function startInputPump(device, deviceDesc, reportDesc) {
         result[2] = ((result[2] << 11) >> 11);
         return result;
       };
-
-      // TODO: prep data as in SensorDeviceImpl::onTrackerMessage
-      // (float scaling/etc)
+      function accelFromBodyFrameUpdate(message, n) {
+        return new Float32Array([
+          message.samples[n].accel[0] * 0.0001,
+          message.samples[n].accel[1] * 0.0001,
+          message.samples[n].accel[2] * 0.0001
+        ]);
+      };
+      function eulerFromBodyFrameUpdate(message, n) {
+        return new Float32Array([
+          message.samples[n].gyro[0] * 0.0001,
+          message.samples[n].gyro[1] * 0.0001,
+          message.samples[n].gyro[2] * 0.0001
+        ]);
+      };
+      function magFromBodyFrameUpdate(message) {
+        // note the swap
+        return new Float32Array([
+          message.magX * 0.0001,
+          message.magZ * 0.0001,
+          message.magY * 0.0001
+        ]);
+      };
 
       var o = 0;
       // 0 = record id?
@@ -747,10 +783,42 @@ function startInputPump(device, deviceDesc, reportDesc) {
           gyro: decodeSensorData(data, o + 16 + 16 * n)
         });
       }
-      if (nn % 100 == 0) {
-        //console.log(message.samples[0].accel, message.samples[0].gyro);
+
+      if (lastTimestamp) {
+        var timestampDelta = (message.timestamp < lastTimestamp) ?
+            (message.timestamp + 0x10000) - lastTimestamp :
+            message.timestamp - lastTimestamp;
+        if (timestampDelta > lastSampleCount && timestampDelta <= 254) {
+          handleSensorData({
+            timeDelta: (timestampDelta - lastSampleCount) * TIME_UNIT,
+            acceleration: lastAcceleration,
+            rotationRate: lastRotationRate,
+            magneticField: lastMagneticField,
+            temperature: lastTemperature
+          });
+        }
       }
-      nn++;
+      lastTimestamp = message.timestamp;
+      lastSampleCount = message.sampleCount;
+
+      var sensors = null;
+      for (var n = 0; n < iterationCount; n++) {
+        sensors = {
+          timeDelta: TIME_UNIT,
+          acceleration: accelFromBodyFrameUpdate(message, n),
+          rotationRate: eulerFromBodyFrameUpdate(message, n),
+          magneticField: magFromBodyFrameUpdate(message),
+          temperature: message.temperature * 0.01
+        };
+        handleSensorData(sensors);
+        sensors.timeDelta = TIME_UNIT;
+      }
+      for (var n = 0; n < 3; n++) {
+        lastAcceleration[n] = sensors.acceleration[n];
+        lastRotationRate[n] = sensors.rotationRate[n];
+        lastMagneticField[n] = sensors.magneticField[n];
+      }
+      lastTemperature = sensors.temperature;
 
       // console.log('time since last', Date.now() - lastKeepAliveTime);
       if (Date.now() - lastKeepAliveTime > 5 * 1000) {
