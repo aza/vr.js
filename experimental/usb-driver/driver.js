@@ -1072,6 +1072,9 @@ global.__vr_driver__ = {
   rotation: sensorFusion.Q,
   reset: function() {
     sensorFusion.reset();
+  },
+  dispose: function() {
+    // TODO: close device/etc.
   }
 };
 
