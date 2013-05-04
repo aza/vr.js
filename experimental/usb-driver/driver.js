@@ -6,6 +6,13 @@
  */
 
 
+// Discovered bugs (to file):
+// interrupt transfer does not time out/error if device is unplugged (OSX, +?)
+// control transfter does not fail if device is unplugged (OSX, +?)
+// sometimes control transfer will fail with an undefined argument (no info)
+// claimInterface has no error argument (all)
+
+
 (function(global) {
 
 var assert = this.assert ||
@@ -292,28 +299,27 @@ var OculusDevice = function(deviceHandle, deviceDesc, reportDesc, hmdInfo) {
   this.lastSampleCount_ = 0;
 
   /**
-   * @type {!Float32Array}
+   * Sensor data from the previous packet.
+   * This is used to fill in data holes when packets are dropped.
+   * @type {!SensorData}
    * @private
    */
-  this.lastAcceleration_ = new Float32Array(3);
+  this.lastSensorData_ = new SensorData();
 
   /**
-   * @type {!Float32Array}
+   * Cached sensor data.
+   * THis is updated each packet. Clone if needed.
+   * @type {!SensorData}
    * @private
    */
-  this.lastRotationRate_ = new Float32Array(3);
+  this.sensorData_ = new SensorData();
 
   /**
-   * @type {!Float32Array}
+   * Scratch int32 array.
+   * @type {!Int32Array}
    * @private
    */
-  this.lastMagneticField_ = new Float32Array(3);
-
-  /**
-   * @type {number}
-   * @private
-   */
-  this.lastTemperature_ = 0;
+  this.tempInt32_ = new Int32Array(3);
 
   // Start getting input.
   this.beginInputPump_();
@@ -511,105 +517,120 @@ OculusDevice.prototype.inputPump_ = function(data, opt_error) {
 
   var TIME_UNIT = 1 / 1000;
 
-  // TODO(benvanik): this code is terrible - cleanup!
-
-  function decodeSensorData(data, o) {
-    var result = new Int32Array(3);
-    result[0] = (data[o + 0] << 13) | (data[o + 1] << 5) |
-                ((data[o + 2] & 0xF8) >> 3);
-    result[1] = ((data[o + 2] & 0x07) << 18) | (data[o + 3] << 10) |
-                (data[o + 4] << 2) | ((data[o + 5] & 0xC0) >> 6);
-    result[2] = ((data[o + 5] & 0x3F) << 15) | (data[o + 6] << 7) |
-                (data[o + 7] >> 1);
-    result[0] = ((result[0] << 11) >> 11);
-    result[1] = ((result[1] << 11) >> 11);
-    result[2] = ((result[2] << 11) >> 11);
-    return result;
-  };
-  var AS = 1;
-  var ES = 10;
-  function accelFromBodyFrameUpdate(message, n) {
-    return new Float32Array([
-      message.samples[n].accel[0] * 0.0001 * AS,
-      message.samples[n].accel[1] * 0.0001 * AS,
-      message.samples[n].accel[2] * 0.0001 * AS
-    ]);
-  };
-  function eulerFromBodyFrameUpdate(message, n) {
-    return new Float32Array([
-      message.samples[n].gyro[0] * 0.0001 * ES,
-      message.samples[n].gyro[1] * 0.0001 * ES,
-      message.samples[n].gyro[2] * 0.0001 * ES
-    ]);
-  };
-  function magFromBodyFrameUpdate(message) {
-    // note the swap
-    return new Float32Array([
-      message.magX * 0.0001,
-      message.magZ * 0.0001,
-      message.magY * 0.0001
-    ]);
-  };
-
+  // Parse incoming message.
   var o = 0;
   // 0 = record id?
-  var message = {
-    sampleCount: data[o + 1],
-    timestamp: decodeUint16(data, o + 2),
-    lastCommandId: decodeUint16(data, o + 4),
-    temperature: decodeInt16(data, o + 6),
-    samples: [],
-    magX: decodeInt16(data, o + 56),
-    magY: decodeInt16(data, o + 58),
-    magZ: decodeInt16(data, o + 60)
-  };
-  var iterationCount = (message.sampleCount > 2) ? 3 : message.sampleCount;
-  for (var n = 0; n < iterationCount; n++) {
-    message.samples.push({
-      accel: decodeSensorData(data, o + 8 + 16 * n),
-      gyro: decodeSensorData(data, o + 16 + 16 * n)
-    });
-  }
+  var sampleCount = data[o + 1];
+  var timestamp = decodeUint16(data, o + 2);
+  var lastCommandId = decodeUint16(data, o + 4);
+  var temperature = decodeInt16(data, o + 6);
+  var magX = decodeInt16(data, o + 56);
+  var magY = decodeInt16(data, o + 58);
+  var magZ = decodeInt16(data, o + 60);
+  var iterationCount = (sampleCount > 2) ? 3 : sampleCount;
 
+  // Repeat previous sensor data if we dropped some packets.
   if (this.lastTimestamp_) {
-    var timestampDelta = (message.timestamp < this.lastTimestamp_) ?
-        (message.timestamp + 0x10000) - this.lastTimestamp_ :
-        message.timestamp - this.lastTimestamp_;
+    var timestampDelta = (timestamp < this.lastTimestamp_) ?
+        (timestamp + 0x10000) - this.lastTimestamp_ :
+        timestamp - this.lastTimestamp_;
     if (timestampDelta > this.lastSampleCount_ && timestampDelta <= 254) {
-      this.sensorFusion_.handleSensorData({
-        timeDelta: (timestampDelta - this.lastSampleCount_) * TIME_UNIT,
-        acceleration: this.lastAcceleration_,
-        rotationRate: this.lastRotationRate_,
-        magneticField: this.lastMagneticField_,
-        temperature: this.lastTemperature_
-      });
+      this.lastSensorData_.timeDelta =
+          (timestampDelta - this.lastSampleCount_) * TIME_UNIT;
+      this.sensorFusion_.handleSensorData(this.lastSensorData_);
     }
   }
-  this.lastTimestamp_ = message.timestamp;
-  this.lastSampleCount_ = message.sampleCount;
+  this.lastTimestamp_ = timestamp;
+  this.lastSampleCount_ = sampleCount;
 
-  var sensors = null;
+  var tempInt32 = this.tempInt32_;
+  function decodeSensorData(data, o, out) {
+    out[0] = (data[o + 0] << 13) | (data[o + 1] << 5) |
+             ((data[o + 2] & 0xF8) >> 3);
+    out[1] = ((data[o + 2] & 0x07) << 18) | (data[o + 3] << 10) |
+             (data[o + 4] << 2) | ((data[o + 5] & 0xC0) >> 6);
+    out[2] = ((data[o + 5] & 0x3F) << 15) | (data[o + 6] << 7) |
+             (data[o + 7] >> 1);
+    out[0] = ((out[0] << 11) >> 11);
+    out[1] = ((out[1] << 11) >> 11);
+    out[2] = ((out[2] << 11) >> 11);
+  };
+  function accelFromSensorData(data, o, out) {
+    decodeSensorData(data, o, tempInt32);
+    out[0] = tempInt32[0] * 0.0001;
+    out[1] = tempInt32[1] * 0.0001;
+    out[2] = tempInt32[2] * 0.0001;
+  };
+  function eulerFromSensorData(data, o, out) {
+    // TODO(benvanik): figure out why I have to scale this by 10.
+    var ES = 10;
+    decodeSensorData(data, o, tempInt32);
+    out[0] = tempInt32[0] * 0.0001 * ES;
+    out[1] = tempInt32[1] * 0.0001 * ES;
+    out[2] = tempInt32[2] * 0.0001 * ES;
+  };
+
+  // Read all sensor data.
+  var sensorData = this.sensorData_;
+  // Note the XZY - supposedly future HMDs won't do this.
+  sensorData.magneticField[0] = magX * 0.0001;
+  sensorData.magneticField[1] = magZ * 0.0001;
+  sensorData.magneticField[2] = magY * 0.0001;
   for (var n = 0; n < iterationCount; n++) {
-    sensors = {
-      timeDelta: TIME_UNIT,
-      acceleration: accelFromBodyFrameUpdate(message, n),
-      rotationRate: eulerFromBodyFrameUpdate(message, n),
-      magneticField: magFromBodyFrameUpdate(message),
-      temperature: message.temperature * 0.01
-    };
-    this.sensorFusion_.handleSensorData(sensors);
-    sensors.timeDelta = TIME_UNIT;
+    // Read sensor data.
+    sensorData.timeDelta = TIME_UNIT;
+    accelFromSensorData(data, o + 8 + 16 * n, sensorData.acceleration);
+    eulerFromSensorData(data, o + 16 + 16 * n, sensorData.rotationRate);
+    sensorData.temperature = temperature * 0.01;
+
+    // Dispatch data packet.
+    this.sensorFusion_.handleSensorData(sensorData);
   }
-  for (var n = 0; n < 3; n++) {
-    this.lastAcceleration_[n] = sensors.acceleration[n];
-    this.lastRotationRate_[n] = sensors.rotationRate[n];
-    this.lastMagneticField_[n] = sensors.magneticField[n];
-  }
-  this.lastTemperature_ = sensors.temperature;
+  // Swap the new data into the last for next callback.
+  this.sensorData_ = this.lastSensorData_;
+  this.lastSensorData_ = sensorData;
 
   return true;
 };
 
+
+
+/**
+ * Sensor data from the device.
+ * These are cached instances that are overwritten each time new data arrives.
+ * If you need to preserve this data, clone it.
+ */
+var SensorData = function() {
+  /**
+   * Time elapsed since hte last sensor reading.
+   * @type {number}
+   */
+  this.timeDelta = 0;
+
+  /**
+   * Acceleration reading.
+   * @type {!Float32Array}
+   */
+  this.acceleration = new Float32Array(3);
+
+  /**
+   * Rotation rate reading.
+   * @type {!Float32Array}
+   */
+  this.rotationRate = new Float32Array(3);
+
+  /**
+   * Magnetic field reading.
+   * @type {!Float32Array}
+   */
+  this.magneticField = new Float32Array(3);
+
+  /**
+   * Temperature reading.
+   * @type {number}
+   */
+  this.temperature = 0;
+};
 
 
 /**
@@ -1322,6 +1343,7 @@ function setSensorKeepAlive(device, deviceDesc, intervalMs, callback) {
 
 
 // TODO(benvanik): cleanup
+// Some of this comes from tojiro's gl-matrix.
 var vec3f = {};
 vec3f.copy = function(out, a) {
   out[0] = a[0];
