@@ -1587,6 +1587,16 @@ var SensorFusion = function() {
    * @type {Float32Array}
    */
   this.tempQuat_ = new Float32Array(4);
+
+  /**
+   * Scratch vec3s for temp math.
+   * @type {!Array.<!Float32Array>}
+   * @private
+   */
+  this.tempVec3s_ = [
+    new Float32Array(3), new Float32Array(3),
+    new Float32Array(3), new Float32Array(3)
+  ];
 };
 
 
@@ -1611,7 +1621,7 @@ SensorFusion.prototype.handleSensorData = function(sensors) {
   var angVelLength = vec3f.length(angVel);
   var accLength = vec3f.length(rawAccel);
 
-  var accWorld = new Float32Array(3);
+  var accWorld = this.tempVec3s_[0];
   vec3f.transformQuat(accWorld, rawAccel, this.Q);
 
   this.Stage++;
@@ -1622,11 +1632,11 @@ SensorFusion.prototype.handleSensorData = function(sensors) {
   this.FAngV.addElement(angVel);
 
   if (angVelLength > 0) {
-    var rotAxis = new Float32Array(3);
+    var rotAxis = this.tempVec3s_[0];
     vec3f.scale(rotAxis, angVel, 1 / angVelLength);
     var halfRotAngle = angVelLength * deltaT * 0.5;
     var sinHRA = Math.sin(halfRotAngle);
-    var deltaQ = new Float32Array(4);
+    var deltaQ = this.tempQuat_;
     deltaQ[0] = rotAxis[0] * sinHRA;
     deltaQ[1] = rotAxis[1] * sinHRA;
     deltaQ[2] = rotAxis[2] * sinHRA;
@@ -1636,7 +1646,7 @@ SensorFusion.prototype.handleSensorData = function(sensors) {
 
     quatf.copy(this.QP, this.Q);
     if (this.EnablePrediction) {
-      var angVelF = new Float32Array(3);
+      var angVelF = this.tempVec3s_[1];
       this.FAngV.getSavitzkyGolaySmooth8(angVelF);
       var angVelFL = vec3f.length(angVelF);
       if (angVelFL > 0.001) {
@@ -1671,18 +1681,21 @@ SensorFusion.prototype.handleSensorData = function(sensors) {
 
     if (this.TiltCondCount >= tiltPeriod) {
       this.TiltCondCount = 0;
-      var accWMean = new Float32Array(3);
+      var accWMean = this.tempVec3s_[0];
       this.FAccW.getMean(accWMean);
-      var xzAcc = new Float32Array(3);
+      var xzAcc = this.tempVec3s_[1];
       xzAcc[0] = accWMean[0];
       xzAcc[1] = 0;
       xzAcc[2] = accWMean[2];
-      var tiltAxis = new Float32Array(3);
+      var tiltAxis = this.tempVec3s_[2];
       tiltAxis[0] = xzAcc[2];
       tiltAxis[1] = 0;
       tiltAxis[2] = -xzAcc[0];
       vec3f.normalize(tiltAxis, tiltAxis);
-      var yUp = new Float32Array([0, 1, 0]);
+      var yUp = this.tempVec3s_[3];
+      yUp[0] = 0;
+      yUp[1] = 1;
+      yUp[2] = 0;
       var tiltAngle = vec3f.angle(yUp, accWMean);
       if (tiltAngle > maxTiltError) {
         this.TiltErrorAngle = tiltAngle;
