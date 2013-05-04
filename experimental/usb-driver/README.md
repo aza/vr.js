@@ -4,6 +4,8 @@ This implements a simple, hacky Oculus Rift dev kit driver in pure Javascript us
 
 If Mozilla completes their implementation of [WebUSB](https://bugzilla.mozilla.org/show_bug.cgi?id=674718) then this could be made to run there as well.
 
+*This is the future.* The idea of secure, installation-less device drivers is incredibly exciting to me. Because permissions are granted on a per-device basis and the driver code is running within Chrome's sandbox there's effectively zero risk when using them. Of course your video driver won't be written in Javascript but almost all input and simple output devices could be. Imagine if all of your device drivers were secure, always available/zero install, worked on Windows/Mac/Linux/etc, and updatable within hours of new versions being released. Yessss.
+
 ## Preparing the Device
 
 Unfortunately the Rift exposes itself as a HID device and operating systems prevent Chrome from using them. Hopefully future versions of Chrome will expose a HID API that allows easy access to these devices, but for now you must disable the built-in operating system HID control of the device. Once you do this the Rift will not be usable by the official Rift SDK until you disable the hacks.
