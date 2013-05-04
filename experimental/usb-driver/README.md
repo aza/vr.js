@@ -46,7 +46,7 @@ Uninstalling:
 
 ## Limitations
 
-The chrome.usb APIs (and all of the chrome.* APIs) are implemented very inefficiently right now. THe actual time spent in Javascript while using this driver is miniscule and the overhead from the APIs dwarfs it by orders of magnitude. Hopefully work can be done to optimize the IPC occurring during each API call, as well as adding APIs that more accurately model the use case of USB (for example, overlapping interrupt reads to prevent the round-trip stalls).
+The chrome.usb APIs (and all of the chrome.* APIs) are implemented very inefficiently right now. THe actual time spent in Javascript while using this driver is miniscule and the overhead from the APIs dwarfs it by orders of magnitude (or three...). Hopefully work can be done to optimize the IPC occurring during each API call, as well as adding APIs that more accurately model the use case of USB (for example, overlapping interrupt reads to prevent the round-trip stalls). I don't think many others have exercised the APIs like this does, so it can only get better with feedback!
 
 The Chrome API's only expose raw USB devices and there is no API for HID devices (such as the Rift). This is why the hacks above are required. My hope is that Chrome will expose HID devices through chrome.usb (or some other API) to allow this driver to work on all platforms without any work by the user.
 
