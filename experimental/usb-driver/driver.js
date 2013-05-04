@@ -262,12 +262,14 @@ var OculusDevice = function(deviceHandle, deviceDesc, reportDesc, hmdInfo) {
   this.sensorFusion_ = new SensorFusion();
 
   /**
-   * The last time a keep-alive was sent.
-   * These must be sent periodically or the device will shut down.
-   * @type {number}
+   * Timer interval used for sending keep alives.
+   * These are not within the main input pump so that we can detect device
+   * removal. They must be sent more frequently than the device keep alive time
+   * otherwise it will shut down.
+   * @type {number|null}
    * @private
    */
-  this.lastKeepAliveTime_ = 0;
+  this.keepAliveInterval_ = null;
 
   /**
    * Whether the input pump is running.
@@ -400,6 +402,15 @@ OculusDevice.create = function(deviceHandle, callback, opt_scope) {
 
 
 /**
+ * Interval to send keep-alives to the device.
+ * @type {number}
+ * @const
+ * @private
+ */
+OculusDevice.KEEP_ALIVE_INTERVAL_MS_ = 5 * 1000;
+
+
+/**
  * Begins the input pump.
  * This will claim the interface and hopefully start receiving data.
  * @private
@@ -412,6 +423,18 @@ OculusDevice.prototype.beginInputPump_ = function() {
   }
 
   this.pumping_ = true;
+
+  // Start the keep alive timer.
+  this.keepAliveInterval_ = global.setInterval(function() {
+    setSensorKeepAlive(self.handle_, self.deviceDesc_, 10 * 1000,
+        function(opt_error) {
+          // On error, device must be disconnected.
+          if (opt_error) {
+            log('keep alive failed, disconnected?');
+            self.endInputPump_();
+          }
+        });
+  }, OculusDevice.KEEP_ALIVE_INTERVAL_MS_);
 
   // Claim the interface.
   // If this fails, it's likely the user doesn't have the USB hacks installed.
@@ -457,18 +480,16 @@ OculusDevice.prototype.endInputPump_ = function() {
   if (!this.pumping_) {
     return;
   }
+
+  // Clear keep alive timer.
+  if (this.keepAliveInterval_ !== null) {
+    global.clearInterval(this.keepAliveInterval_);
+    this.keepAliveInterval_ = null;
+  }
+
   // The next pump will abort when this is set.
   this.pumping_ = false;
 };
-
-
-/**
- * Interval to send keep-alives to the device.
- * @type {number}
- * @const
- * @private
- */
-OculusDevice.KEEP_ALIVE_INTERVAL_MS_ = 5 * 1000;
 
 
 /**
@@ -586,18 +607,6 @@ OculusDevice.prototype.inputPump_ = function(data, opt_error) {
   }
   this.lastTemperature_ = sensors.temperature;
 
-  // console.log('time since last', Date.now() - lastKeepAliveTime);
-  if (Date.now() - this.lastKeepAliveTime_ >
-      OculusDevice.KEEP_ALIVE_INTERVAL_MS_) {
-    log('keep alive ping');
-    // TODO(benvanik): handle errors
-    setSensorKeepAlive(this.handle_, this.deviceDesc_, 10 * 1000,
-        function(error) {
-          //
-        });
-    this.lastKeepAliveTime_ = Date.now();
-  }
-
   return true;
 };
 
@@ -687,6 +696,12 @@ function ioctl_read(deviceHandle, type, request, value, index, length,
     index: index,
     length: length
   }, function(info) {
+    // If we fail really hard (device closed/etc), info will be undefined.
+    // TODO(benvanik); file a bug on this.
+    if (!info) {
+      callback(1, null);
+      return;
+    }
     callback(
         info.resultCode,
         info.resultCode ? null : new Uint8Array(info.data));
