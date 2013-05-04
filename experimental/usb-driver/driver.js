@@ -10,31 +10,675 @@
 
 var assert = this.assert ||
     function() { console.assert.apply(console, arguments); };
+var log = function(var_args) {
+  if (global.console && global.console.log) {
+    global.console.log.apply(global.console, arguments);
+  }
+};
 
-startup();
 
-function startup() {
-  chrome.usb.findDevices({
-    vendorId: TRACKER_DK_VENDOR_ID,
-    productId: TRACKER_DK_PRODUCT_ID
-  }, function(devices) {
-    if (devices.length) {
-      console.log('found ' + devices.length + ' devices');
-      for (var n = 0; n < devices.length; n++) {
-        queryDevice(devices[n]);
+/**
+ * Oculus Rift device driver and data provider.
+ * @constructor
+ */
+var OculusDriver = function() {
+  /**
+   * Device instance, if one is present.
+   * @type {OculusDevice}
+   */
+  this.device_ = null;
+
+  /**
+   * Timer interval for device scanning.
+   * Managed by {@link OculusDriver#beginDeviceScan_}.
+   * @type {number|null}
+   * @private
+   */
+  this.deviceScanInterval_ = null;
+
+  // Start scanning for devices.
+  this.beginDeviceScan_();
+};
+
+
+/**
+ * Disposes the driver and any dependent resources.
+ */
+OculusDriver.prototype.dispose = function() {
+  // Stop any device scans.
+  this.endDeviceScan_();
+
+  // Close any open devices.
+  if (this.device_) {
+    this.device_.dispose();
+    this.device_ = null;
+  }
+};
+
+
+/**
+ * Gets a value indicating whether a device is present.
+ * @return {boolean} True if a device is present.
+ */
+OculusDriver.prototype.isPresent = function() {
+  return !!this.device_;
+};
+
+
+/**
+ * Time interval for device rescans, in milliseconds.
+ * @type {number}
+ * @const
+ * @private
+ */
+OculusDriver.SCAN_INTERVAL_MS_ = 1000;
+
+
+/**
+ * Begins periodic scanning for devices.
+ * When a device is found the scan is stopped.
+ * @private
+ */
+OculusDriver.prototype.beginDeviceScan_ = function() {
+  if (this.deviceScanInterval_ !== null) {
+    return;
+  }
+  var self = this;
+  this.deviceScanInterval_ = global.setInterval(function() {
+    chrome.usb.findDevices({
+      vendorId: TRACKER_DK_VENDOR_ID,
+      productId: TRACKER_DK_PRODUCT_ID
+    }, function(deviceHandles) {
+      if (!deviceHandles.length) {
+        // No devices found.
+        return;
       }
-    } else {
-      console.log('no devices');
+
+      // Stop scanning for more.
+      self.endDeviceScan_();
+
+      // Close any extra devices besdies the first - we only support one.
+      for (var n = 1; n < deviceHandles.length; n++) {
+        chrome.usb.closeDevice(deviceHandles[n]);
+      }
+
+      // Handle the new device.
+      self.deviceFound_(deviceHandles[0]);
+    });
+  }, OculusDriver.SCAN_INTERVAL_MS_);
+};
+
+
+/**
+ * Stops scanning for devices.
+ * @private
+ */
+OculusDriver.prototype.endDeviceScan_ = function() {
+  if (this.deviceScanInterval_ === null) {
+    return;
+  }
+  global.clearInterval(this.deviceScanInterval_);
+  this.deviceScanInterval_ = null;
+};
+
+
+/**
+ * Handles device discovery.
+ * @param {!Object} deviceHandle Chrome device handle.
+ * @private
+ */
+OculusDriver.prototype.deviceFound_ = function(deviceHandle) {
+  // If we already have a device just replace it.
+  if (this.device_) {
+    this.device_.dispose();
+    this.device_ = null;
+  }
+
+  // Create device.
+  // We do this asynchronously so that we have a complete device when we mark
+  // it present.
+  OculusDevice.create(deviceHandle, function(device, opt_error) {
+    if (opt_error) {
+      log('Error during device creation:', opt_error);
+
+      // Start another device scan.
+      this.beginDeviceScan_();
+      return;
     }
+
+    // Successful - stash.
+    this.device_ = device;
+    log(device);
+  }, this);
+};
+
+
+/**
+ * Fills a vr.js vr.HmdInfo structure with data from the connected evice.
+ * @param {!vr.HmdInfo} target Target info.
+ * @return {boolean} True if the info was filled.
+ */
+OculusDriver.prototype.fillHmdInfo = function(target) {
+  if (!this.device_) {
+    return false;
+  }
+
+  var rawDesc = this.device_.deviceDesc_;
+  var rawInfo = this.device_.hmdInfo_;
+  if (!rawDesc || !rawInfo) {
+    return null;
+  }
+  target.deviceName = rawDesc.productName;
+  target.deviceManufacturer = rawDesc.manufacturerName;
+  target.deviceVersion = 0;
+  target.resolutionHorz = rawInfo.resolutionHorz;
+  target.resolutionVert = rawInfo.resolutionVert;
+  target.screenSizeHorz = rawInfo.screenSizeHorz;
+  target.screenSizeVert = rawInfo.screenSizeVert;
+  target.screenCenterVert = rawInfo.screenCenterVert;
+  target.eyeToScreenDistance = rawInfo.eyeToScreenDistance[0];
+  target.lensSeparationDistance = rawInfo.lensSeparation;
+  target.interpupillaryDistance = 0.064;
+  target.distortionK = new Float32Array([
+    1.0, 0.22, 0.24, 0.0
+  ]);
+  target.chromaAbCorrection = new Float32Array([
+    0.996, -0.004, 1.014, 0.0
+  ]);
+  return true;
+};
+
+
+/**
+ * Resets the orientation value to its default.
+ */
+OculusDriver.prototype.resetOrientation = function() {
+  if (!this.device_) {
+    return;
+  }
+  this.device_.sensorFusion_.reset();
+};
+
+
+/**
+ * Gets the current orientation quaternion.
+ * @param {!Float32Array} out Quaternion result.
+ */
+OculusDriver.prototype.getOrientation = function(out) {
+  if (!this.device_) {
+    return;
+  }
+  var value = this.device_.sensorFusion_.Q;
+  out[0] = value[0];
+  out[1] = value[1];
+  out[2] = value[2];
+  out[3] = value[3];
+};
+
+
+
+/**
+ * Oculus Rift device.
+ * @param {!Object} deviceHandle Chrome device handle.
+ * @param {!DeviceDescriptor} deviceDesc Device descriptor.
+ * @param {!HidReportDescriptor} reportDesc HID report descriptor.
+ * @param {!HmdInfo} hmdInfo Raw HMD info.
+ * @constructor
+ */
+var OculusDevice = function(deviceHandle, deviceDesc, reportDesc, hmdInfo) {
+  /**
+   * Chrome device handle.
+   * @type {!Object}
+   * @private
+   */
+  this.handle_ = deviceHandle;
+
+  /**
+   * Device descriptor.
+   * @type {!DeviceDescriptor}
+   * @private
+   */
+  this.deviceDesc_ = deviceDesc;
+
+  /**
+   * HID report descriptor.
+   * @type {!HidReportDescriptor}
+   * @private
+   */
+  this.reportDesc_ = reportDesc;
+
+  /**
+   * Raw HMD info from the device.
+   * @type {!HmdInfo}
+   * @private
+   */
+  this.hmdInfo_ = hmdInfo;
+
+  /**
+   * Sensor fusion utility.
+   * @type {!SensorFusion}
+   * @private
+   */
+  this.sensorFusion_ = new SensorFusion();
+
+  /**
+   * The last time a keep-alive was sent.
+   * These must be sent periodically or the device will shut down.
+   * @type {number}
+   * @private
+   */
+  this.lastKeepAliveTime_ = 0;
+
+  /**
+   * Whether the input pump is running.
+   * If set to false the input pump will end on the next pump.
+   * @type {boolean}
+   * @private
+   */
+  this.pumping_ = false;
+
+  /**
+   * @type {number}
+   * @private
+   */
+  this.lastTimestamp_ = 0;
+
+  /**
+   * @type {number}
+   * @private
+   */
+  this.lastSampleCount_ = 0;
+
+  /**
+   * @type {!Float32Array}
+   * @private
+   */
+  this.lastAcceleration_ = new Float32Array(3);
+
+  /**
+   * @type {!Float32Array}
+   * @private
+   */
+  this.lastRotationRate_ = new Float32Array(3);
+
+  /**
+   * @type {!Float32Array}
+   * @private
+   */
+  this.lastMagneticField_ = new Float32Array(3);
+
+  /**
+   * @type {number}
+   * @private
+   */
+  this.lastTemperature_ = 0;
+
+  // Start getting input.
+  this.beginInputPump_();
+};
+
+
+/**
+ * Disposes the device and releases the interface.
+ */
+OculusDevice.prototype.dispose = function() {
+  this.endInputPump_();
+};
+
+
+/**
+ * Asynchronously creates and initializes a device.
+ * @param {!Object} deviceHandle Chrome device handle.
+ * @param {!function(this:T, OculusDevice, Error=)} callback Callback function.
+ * @param {T=} opt_scope Optional callback scope.
+ * @template T
+ */
+OculusDevice.create = function(deviceHandle, callback, opt_scope) {
+  // Woo callback hell!
+
+  // Always start with a device reset.
+  chrome.usb.resetDevice(deviceHandle, function(info) {
+    if (info.resultCode) {
+      var e = new Error('Error resetting the device: ' + info.resultCode);
+      e.code = info.resultCode;
+      callback.call(opt_scope, null, e);
+      return;
+    }
+
+    // Grab the device descriptor, which is required for doing everything else.
+    DeviceDescriptor.get(deviceHandle, function(deviceDesc, opt_error) {
+      if (opt_error) {
+        callback.call(opt_scope, null, opt_error);
+        return;
+      }
+
+      // Activate the default configuration.
+      // This is required to enable teh device.
+      chrome.usb.controlTransfer(deviceHandle, {
+        requestType: 'standard',
+        recipient: 'device',
+        direction: 'out',
+        request: 9, // SET_CONFIGURATION
+        value: deviceDesc.configurations[0].configurationValue,
+        index: 0,
+        data: new Uint8Array(0).buffer
+      }, function(info) {
+        if (info.resultCode) {
+          var e = new Error('Error setting device configuration: ' +
+              info.resultCode);
+          e.code = info.resultCode;
+          callback.call(opt_scope, null, e);
+          return;
+        }
+
+        // Get the HID report descriptor.
+        HidReportDescriptor.get(deviceHandle, deviceDesc, function(
+            reportDesc, opt_error) {
+          if (opt_error) {
+            callback.call(opt_scope, null, opt_error);
+            return;
+          }
+
+          // Grab the HMD info.
+          HmdInfo.get(deviceHandle, deviceDesc, function(hmdInfo, opt_error) {
+            if (opt_error) {
+              callback.call(opt_scope, null, opt_error);
+              return;
+            }
+
+            // Create the device.
+            // We purposefully don't begin interrupt transfers yet.
+            var device = new OculusDevice(deviceHandle, deviceDesc, reportDesc,
+                hmdInfo);
+            callback.call(opt_scope, device, undefined);
+          });
+        });
+      });
+    });
   });
 };
 
-function getBcdString(value) {
+
+/**
+ * Begins the input pump.
+ * This will claim the interface and hopefully start receiving data.
+ * @private
+ */
+OculusDevice.prototype.beginInputPump_ = function() {
+  var self = this;
+
+  if (this.pumping_) {
+    return;
+  }
+
+  this.pumping_ = true;
+
+  // Claim the interface.
+  // If this fails, it's likely the user doesn't have the USB hacks installed.
+  // Unfortunately there's no error code passed here, so we can't know.
+  // TODO(benvanik): file issues/etc
+  var configInterface = this.deviceDesc_.configurations[0].interfaces[0];
+  var interfaceNumber = configInterface.interfaceNumber;
+  chrome.usb.claimInterface(this.handle_, interfaceNumber, function() {
+    log('interface claimed, maybe...');
+
+    var endpointAddress = configInterface.endpoints[0].endpointAddress;
+    var inputReport = self.reportDesc_.root.application.logical.reports[0];
+    var reportSize = inputReport.totalSize + 1;
+    function pumpInput() {
+      chrome.usb.interruptTransfer(self.handle_, {
+        direction: 'in',
+        endpoint: endpointAddress,
+        length: reportSize
+      }, function(info) {
+        if (info.resultCode) {
+          var e = new Error('Error during interrupt transfer: ' +
+              info.resultCode);
+          e.code = resultCode;
+          self.inputPump_(null, e);
+          return;
+        }
+        var data = new Uint8Array(info.data);
+        if (self.inputPump_(data, undefined)) {
+          pumpInput();
+        }
+      });
+    };
+    pumpInput();
+  });
+};
+
+
+/**
+ * Ends the input pump.
+ * @private
+ */
+OculusDevice.prototype.endInputPump_ = function() {
+  if (!this.pumping_) {
+    return;
+  }
+  // The next pump will abort when this is set.
+  this.pumping_ = false;
+};
+
+
+/**
+ * Interval to send keep-alives to the device.
+ * @type {number}
+ * @const
+ * @private
+ */
+OculusDevice.KEEP_ALIVE_INTERVAL_MS_ = 5 * 1000;
+
+
+/**
+ * A single input pump.
+ * Called when there is new data from the device.
+ * @param {Uint8Array} data Data, if available.
+ * @param {Error=} opt_error Error, if any occurred.
+ * @return {boolean} True to continue pumping. False to end.
+ */
+OculusDevice.prototype.inputPump_ = function(data, opt_error) {
+  if (!this.pumping_ || opt_error) {
+    var configInterface = this.deviceDesc_.configurations[0].interfaces[0];
+    var interfaceNumber = configInterface.interfaceNumber;
+    chrome.usb.releaseInterface(this.handle_, interfaceNumber, function() {});
+    // TODO(benvanik): handle the error better.
+    log(opt_error);
+    return false;
+  }
+
+  var TIME_UNIT = 1 / 1000;
+
+  // TODO(benvanik): this code is terrible - cleanup!
+
+  function decodeSensorData(data, o) {
+    var result = new Int32Array(3);
+    result[0] = (data[o + 0] << 13) | (data[o + 1] << 5) |
+                ((data[o + 2] & 0xF8) >> 3);
+    result[1] = ((data[o + 2] & 0x07) << 18) | (data[o + 3] << 10) |
+                (data[o + 4] << 2) | ((data[o + 5] & 0xC0) >> 6);
+    result[2] = ((data[o + 5] & 0x3F) << 15) | (data[o + 6] << 7) |
+                (data[o + 7] >> 1);
+    result[0] = ((result[0] << 11) >> 11);
+    result[1] = ((result[1] << 11) >> 11);
+    result[2] = ((result[2] << 11) >> 11);
+    return result;
+  };
+  var AS = 1;
+  var ES = 10;
+  function accelFromBodyFrameUpdate(message, n) {
+    return new Float32Array([
+      message.samples[n].accel[0] * 0.0001 * AS,
+      message.samples[n].accel[1] * 0.0001 * AS,
+      message.samples[n].accel[2] * 0.0001 * AS
+    ]);
+  };
+  function eulerFromBodyFrameUpdate(message, n) {
+    return new Float32Array([
+      message.samples[n].gyro[0] * 0.0001 * ES,
+      message.samples[n].gyro[1] * 0.0001 * ES,
+      message.samples[n].gyro[2] * 0.0001 * ES
+    ]);
+  };
+  function magFromBodyFrameUpdate(message) {
+    // note the swap
+    return new Float32Array([
+      message.magX * 0.0001,
+      message.magZ * 0.0001,
+      message.magY * 0.0001
+    ]);
+  };
+
+  var o = 0;
+  // 0 = record id?
+  var message = {
+    sampleCount: data[o + 1],
+    timestamp: decodeUint16(data, o + 2),
+    lastCommandId: decodeUint16(data, o + 4),
+    temperature: decodeInt16(data, o + 6),
+    samples: [],
+    magX: decodeInt16(data, o + 56),
+    magY: decodeInt16(data, o + 58),
+    magZ: decodeInt16(data, o + 60)
+  };
+  var iterationCount = (message.sampleCount > 2) ? 3 : message.sampleCount;
+  for (var n = 0; n < iterationCount; n++) {
+    message.samples.push({
+      accel: decodeSensorData(data, o + 8 + 16 * n),
+      gyro: decodeSensorData(data, o + 16 + 16 * n)
+    });
+  }
+
+  if (this.lastTimestamp_) {
+    var timestampDelta = (message.timestamp < this.lastTimestamp_) ?
+        (message.timestamp + 0x10000) - this.lastTimestamp_ :
+        message.timestamp - this.lastTimestamp_;
+    if (timestampDelta > this.lastSampleCount_ && timestampDelta <= 254) {
+      this.sensorFusion_.handleSensorData({
+        timeDelta: (timestampDelta - this.lastSampleCount_) * TIME_UNIT,
+        acceleration: this.lastAcceleration_,
+        rotationRate: this.lastRotationRate_,
+        magneticField: this.lastMagneticField_,
+        temperature: this.lastTemperature_
+      });
+    }
+  }
+  this.lastTimestamp_ = message.timestamp;
+  this.lastSampleCount_ = message.sampleCount;
+
+  var sensors = null;
+  for (var n = 0; n < iterationCount; n++) {
+    sensors = {
+      timeDelta: TIME_UNIT,
+      acceleration: accelFromBodyFrameUpdate(message, n),
+      rotationRate: eulerFromBodyFrameUpdate(message, n),
+      magneticField: magFromBodyFrameUpdate(message),
+      temperature: message.temperature * 0.01
+    };
+    this.sensorFusion_.handleSensorData(sensors);
+    sensors.timeDelta = TIME_UNIT;
+  }
+  for (var n = 0; n < 3; n++) {
+    this.lastAcceleration_[n] = sensors.acceleration[n];
+    this.lastRotationRate_[n] = sensors.rotationRate[n];
+    this.lastMagneticField_[n] = sensors.magneticField[n];
+  }
+  this.lastTemperature_ = sensors.temperature;
+
+  // console.log('time since last', Date.now() - lastKeepAliveTime);
+  if (Date.now() - this.lastKeepAliveTime_ >
+      OculusDevice.KEEP_ALIVE_INTERVAL_MS_) {
+    log('keep alive ping');
+    // TODO(benvanik): handle errors
+    setSensorKeepAlive(this.handle_, this.deviceDesc_, 10 * 1000,
+        function(error) {
+          //
+        });
+    this.lastKeepAliveTime_ = Date.now();
+  }
+
+  return true;
+};
+
+
+
+/**
+ * Gets a uint16 from a byte buffer.
+ * @param {!Uint8Array} data Source buffer.
+ * @param {number} offset Starting offset in the buffer.
+ * @return {number} Uint16 value.
+ */
+function decodeUint16(data, offset) {
+  return data[offset + 0] | (data[offset + 1] << 8);
+};
+
+
+/**
+ * Gets an int16 from a byte buffer.
+ * @param {!Uint8Array} data Source buffer.
+ * @param {number} offset Starting offset in the buffer.
+ * @return {number} Int16 value.
+ */
+function decodeInt16(data, offset) {
+  var u = (data[offset + 1] << 8) | data[offset + 0];
+  return u > 32768 - 1 ? u - 65536 : u;
+};
+
+
+/**
+ * Gets a uint32 from a byte buffer.
+ * @param {!Uint8Array} data Source buffer.
+ * @param {number} offset Starting offset in the buffer.
+ * @return {number} Uint32 value.
+ */
+function decodeUint32(data, offset) {
+  return data[offset + 0] | (data[offset + 1] << 8) | (data[offset + 2] << 16) |
+      (data[offset + 3] << 24);
+};
+
+
+/**
+ * Gets a float32 from a byte buffer.
+ * @param {!Uint8Array} data Source buffer.
+ * @param {number} offset Starting offset in the buffer.
+ * @return {number} Float32 value.
+ */
+var decodeFloat32 = (function() {
+  var tempUint32 = new Uint32Array(1);
+  var tempFloat32 = new Float32Array(tempUint32.buffer);
+  return function decodeFloat32(data, offset) {
+    tempUint32[0] = decodeUint32(data, offset);
+    return tempFloat32[0];
+  };
+})();
+
+
+/**
+ * Formats a BCD value to a string.
+ * This is probably right.
+ * @param {number} value 16-bit BCD value.
+ * @return {string} String form.
+ */
+function formatBcd(value) {
   return (value >> 8) + '.' + String((value >> 4) & 0xF) + String(value & 0xF);
 };
 
-function ioctl_read(device, type, request, value, index, length, callback) {
-  chrome.usb.controlTransfer(device, {
+
+/**
+ * IOCTL-like method for reading from a device.
+ * @param {!Object} deviceHandle Chrome device handle.
+ * @param {string} type Request type.
+ * @param {number} request Request number.
+ * @param {number} value Value.
+ * @param {number} index Index.
+ * @param {number} length Expected response length.
+ * @param {!function(number, Uint8Array)} callback Callback. Receives a result
+ *     code (non-zero for error) and a data buffer.
+ */
+function ioctl_read(deviceHandle, type, request, value, index, length,
+    callback) {
+  chrome.usb.controlTransfer(deviceHandle, {
     requestType: type,
     recipient: 'device',
     direction: 'in',
@@ -50,32 +694,101 @@ function ioctl_read(device, type, request, value, index, length, callback) {
 };
 
 
-var HidDevice = function(device) {
-  this.device_ = device;
-};
-HidDevice.prototype.getFeatureReport = function() {
-
-};
-HidDevice.prototype.setFeatureReport = function() {
-};
-
-function getDeviceString(device, index, callback) {
-  ioctl_read(device, 'standard', 6, 0x0300 | index, 0, 256,
+/**
+ * Gets a device descriptor string.
+ * @param {!Object} deviceHandle Chrome device handle.
+ * @param {number} index String index.
+ * @param {!function(string|null, Error=)} callback Callback that receives a
+ *     string and an error object if the get failed.
+ */
+function getDeviceString(deviceHandle, index, callback) {
+  ioctl_read(deviceHandle, 'standard', 6, 0x0300 | index, 0, 256,
       function(resultCode, data) {
         if (resultCode) {
-          callback(null);
-        } else {
-          // bLength / bDescriptorType / bString*
-          var chars = new Array(data.length - 2);
-          for (var n = 0; n < chars.length; n++) {
-            chars[n] = data[n + 2];
-          }
-          var str = String.fromCharCode.apply(null, chars);
-          str = str.trim();
-          callback(str);
+          var e = new Error('Error getting string descriptor: ' + resultCode);
+          e.code = resultCode;
+          callback(null, e);
+          return;
         }
+
+        // bLength / bDescriptorType / bString*
+        var chars = new Array(data.length - 2);
+        for (var n = 0; n < chars.length; n++) {
+          chars[n] = data[n + 2];
+        }
+        var str = String.fromCharCode.apply(null, chars);
+        str = str.trim();
+        callback(str, undefined);
       });
 };
+
+
+/**
+ * Gets a HID feature report.
+ * @param {!Object} device Chrome device handle.
+ * @param {!DeviceDescriptor} deviceDesc Device descriptor.
+ * @param {number} reportId Report ID.
+ * @param {number} length Report length.
+ * @param {!function(Uint8Array, Error=)} callback Callback. Receives the report
+ *     data or an error.
+ */
+function getHidFeatureReport(device, deviceDesc, reportId, length, callback) {
+  // TODO(benvanik): pass in as an argument?
+  var interfaceNumber =
+      deviceDesc.configurations[0].interfaces[0].interfaceNumber;
+  chrome.usb.controlTransfer(device, {
+    requestType: 'class',
+    recipient: 'interface',
+    direction: 'in',
+    request: 0x01,
+    value: 0x0300 | reportId,
+    index: interfaceNumber,
+    length: length
+  }, function(info) {
+    if (info.resultCode) {
+      var e = new Error('Error getting HID feature report: ' + info.resultCode);
+      e.code = info.resultCode;
+      callback(null, e);
+      return;
+    }
+    callback(new Uint8Array(info.data), undefined);
+  });
+};
+
+
+/**
+ * Sets a HID feature report.
+ * @param {!Object} device Chrome device handle.
+ * @param {!DeviceDescriptor} deviceDesc Device descriptor.
+ * @param {number} reportId Report ID.
+ * @param {!Uint8Array} data Report data.
+ * @param {!function(Error=)} callback Callback. Receives an error if one
+ *     occurred.
+ */
+function setHidFeatureReport(device, deviceDesc, reportId, data, callback) {
+  // TODO(benvanik): pass in as an argument?
+  var interfaceNumber =
+      deviceDesc.configurations[0].interfaces[0].interfaceNumber;
+  chrome.usb.controlTransfer(device, {
+    requestType: 'class',
+    recipient: 'interface',
+    direction: 'out',
+    request: 0x09,
+    value: 0x0300 | reportId,
+    index: interfaceNumber,
+    data: data.buffer
+  }, function(info) {
+    if (info.resultCode) {
+      var e = new Error('Error setting HID feature report: ' + info.resultCode);
+      e.code = info.resultCode;
+      callback(e);
+      return;
+    }
+    callback(undefined);
+  });
+};
+
+
 
 var EndpointDescriptor = function(data, o) {
   // http://www.beyondlogic.org/usbnutshell/usb5.shtml#EndpointDescriptors
@@ -92,7 +805,7 @@ EndpointDescriptor.TYPE = 5;
 var HidDescriptor = function(data, o) {
   assert(data[o++] == HidDescriptor.LENGTH);            // bLength
   assert(data[o++] == HidDescriptor.TYPE);              // bDescriptorType
-  this.hid = getBcdString(data[o++] | (data[o++] << 8)); // bcdHID
+  this.hid = formatBcd(data[o++] | (data[o++] << 8)); // bcdHID
   this.countryCode = data[o++];                         // bCountryCode
   var descriptorCount = data[o++];                      // bNumDescriptors
   this.descriptorType = data[o++];                      // bDescriptorType
@@ -162,43 +875,45 @@ var ConfigurationDescriptor = function(data) {
   }
 };
 ConfigurationDescriptor.TYPE = 2;
-ConfigurationDescriptor.get = function(device, index, callback) {
-  ioctl_read(device, 'standard', 6, 0x0200 | index, 0, 2048,
+ConfigurationDescriptor.get = function(deviceHandle, index, callback) {
+  ioctl_read(deviceHandle, 'standard', 6, 0x0200 | index, 0, 2048,
       function(resultCode, data) {
         if (resultCode) {
-          console.log('unable to get ConfigurationDescriptor: ' + resultCode);
-          callback(null);
+          var e = new Error('Error getting ConfigurationDescriptor: ' +
+              resultCode);
+          e.code = resultCode;
+          callback(null, e);
           return;
         }
 
         var desc = new ConfigurationDescriptor(data);
 
         var remainingCount = 0;
-        function finishCallback(successful) {
-          if (!successful) {
-            callback(null);
+        function finishCallback(opt_error) {
+          if (opt_error) {
+            callback(null, opt_error);
             remainingCount = 0;
             return;
           }
           remainingCount--;
           if (remainingCount == 0) {
-            callback(desc);
+            callback(desc, undefined);
           }
         };
 
         remainingCount += 1;
-        getDeviceString(device, desc.extraData_.configurationIndex,
-            function(str) {
+        getDeviceString(deviceHandle, desc.extraData_.configurationIndex,
+            function(str, opt_error) {
               desc.configurationName = str || '';
-              finishCallback(!!str);
+              finishCallback(opt_error);
             });
 
         remainingCount += desc.interfaces.length;
         desc.interfaces.forEach(function(interfaceDesc) {
-          getDeviceString(device, interfaceDesc.extraData_.interfaceIndex,
-              function(str) {
+          getDeviceString(deviceHandle, interfaceDesc.extraData_.interfaceIndex,
+              function(str, opt_error) {
                 interfaceDesc.interfaceName = str || '';
-                finishCallback(!!str);
+                finishCallback(opt_error);
               });
         });
       });
@@ -209,14 +924,14 @@ var DeviceDescriptor = function(data) {
   var o = 0;
   o++;                                                  // bLength
   o++;                                                  // bDescriptorType
-  this.usbVersion = getBcdString(data[o++] | (data[o++] << 8)); // bcdUSB
+  this.usbVersion = formatBcd(data[o++] | (data[o++] << 8)); // bcdUSB
   this.deviceClass = data[o++];                         // bDeviceClass
   this.deviceSubClass = data[o++];                      // bDeviceSubClass
   this.deviceProtocol = data[o++];                      // bDeviceProtocol
   this.maxPacketSize = data[o++];                       // bMaxPacketSize
   this.vendorId = data[o++] | (data[o++] << 8);         // idVendor
   this.productId = data[o++] | (data[o++] << 8);        // idProduct
-  this.deviceRelease = getBcdString(data[o++] | (data[o++] << 8)); // bcdDevice
+  this.deviceRelease = formatBcd(data[o++] | (data[o++] << 8)); // bcdDevice
   this.extraData_ = {
     manufacturerIndex: data[o++],                       // iManufacturer
     productIndex: data[o++],                            // iProduct
@@ -230,267 +945,60 @@ var DeviceDescriptor = function(data) {
   this.configurations = [];
 };
 DeviceDescriptor.SIZE = 18;
-DeviceDescriptor.get = function(device, callback) {
-  ioctl_read(device, 'standard', 6, 0x0100, 0, DeviceDescriptor.SIZE,
+DeviceDescriptor.get = function(deviceHandle, callback) {
+  ioctl_read(deviceHandle, 'standard', 6, 0x0100, 0, DeviceDescriptor.SIZE,
       function(resultCode, data) {
         if (resultCode) {
-          console.log('unable to get DeviceDescriptor: ' + resultCode);
-          callback(null);
+          var e = new Error('Error getting DeviceDescriptor: ' + resultCode);
+          e.code = resultCode;
+          callback(null, e);
           return;
         }
 
         var desc = new DeviceDescriptor(data);
 
         var remainingCount = 0;
-        function finishCallback(successful) {
-          if (!successful) {
-            callback(null);
+        function finishCallback(opt_error) {
+          if (opt_error) {
+            callback(null, opt_error);
             remainingCount = 0;
             return;
           }
           remainingCount--;
           if (remainingCount == 0) {
-            callback(desc);
+            callback(desc, undefined);
           }
         };
 
         remainingCount += 3;
-        getDeviceString(device, desc.extraData_.manufacturerIndex,
-            function(str) {
+        getDeviceString(deviceHandle, desc.extraData_.manufacturerIndex,
+            function(str, opt_error) {
               desc.manufacturerName = str || '';
-              finishCallback(!!str);
+              finishCallback(opt_error);
             });
-        getDeviceString(device, desc.extraData_.productIndex,
-            function(str) {
+        getDeviceString(deviceHandle, desc.extraData_.productIndex,
+            function(str, opt_error) {
               desc.productName = str || '';
-              finishCallback(!!str);
+              finishCallback(opt_error);
             });
-        getDeviceString(device, desc.extraData_.serialNumberIndex,
-            function(str) {
+        getDeviceString(deviceHandle, desc.extraData_.serialNumberIndex,
+            function(str, opt_error) {
               desc.serialNumber = str || '';
-              finishCallback(!!str);
+              finishCallback(opt_error);
             });
 
         remainingCount += desc.extraData_.configurationCount;
-        function configurationCallback(config) {
+        function configurationCallback(config, opt_error) {
           if (config) {
             desc.configurations.push(config);
           }
-          finishCallback(!!config);
+          finishCallback(opt_error);
         };
         for (var n = 0; n < desc.extraData_.configurationCount; n++) {
-          ConfigurationDescriptor.get(device, n, configurationCallback);
+          ConfigurationDescriptor.get(deviceHandle, n, configurationCallback);
         }
       });
 };
-
-function decodeUint16(data, offset) {
-  return data[offset + 0] | (data[offset + 1] << 8);
-};
-function decodeInt16(data, offset) {
-  var u = (data[offset + 1] << 8) | data[offset + 0];
-  return u > 32768 - 1 ? u - 65536 : u;
-};
-function decodeUint32(data, offset) {
-  return data[offset + 0] | (data[offset + 1] << 8) | (data[offset + 2] << 16) |
-      (data[offset + 3] << 24);
-};
-var tempUint32 = new Uint32Array(1);
-var tempFloat32 = new Float32Array(tempUint32.buffer);
-function decodeFloat32(data, offset) {
-  tempUint32[0] = decodeUint32(data, offset);
-  return tempFloat32[0];
-};
-
-var HmdInfo = function(data) {
-  var o = 0;
-  this.commandId = data[o + 1] | (data[o + 2] << 8);
-  this.distortionType = data[o + 3];
-  this.resolutionHorz = decodeUint16(data, o + 4);
-  this.resolutionVert = decodeUint16(data, o + 6);
-  this.screenSizeHorz = decodeUint32(data, o + 8) *  (1/1000000);
-  this.screenSizeVert = decodeUint32(data, o + 12) * (1/1000000);
-  this.screenCenterVert = decodeUint32(data, o + 16) * (1/1000000);
-  this.lensSeparation = decodeUint32(data, o + 20) * (1/1000000);
-  this.eyeToScreenDistance = new Float32Array([
-    decodeUint32(data, o + 24) * (1/1000000),
-    decodeUint32(data, o + 28) * (1/1000000)
-  ]);
-  this.distortionK = new Float32Array([
-    decodeFloat32(data, o + 32),
-    decodeFloat32(data, o + 36),
-    decodeFloat32(data, o + 40),
-    decodeFloat32(data, o + 44),
-    decodeFloat32(data, o + 48),
-    decodeFloat32(data, o + 52)
-  ]);
-};
-HmdInfo.get = function(device, deviceDesc, callback) {
-  getFeatureReport(device, deviceDesc, 9, 56, function(data) {
-    if (data) {
-      callback(new HmdInfo(data));
-    } else {
-      callback(null);
-    }
-  });
-};
-
-
-var SensorRange = function(data) {
-  var o = 0;
-  this.commandId = data[o + 1] | (data[o + 2] << 8);
-  this.accelScale = data[o + 3];
-  this.gyroScale = decodeUint16(data, o + 4);
-  this.magScale = decodeUint16(data, o + 6);
-};
-SensorRange.get = function(device, deviceDesc, callback) {
-  getFeatureReport(device, deviceDesc, 4, 8, function(data) {
-    if (data) {
-      callback(new SensorRange(data));
-    } else {
-      callback(null);
-    }
-  });
-};
-
-
-
-
-function getFeatureReport(device, deviceDesc, reportId, length, callback) {
-  var interfaceNumber = deviceDesc.configurations[0].interfaces[0].interfaceNumber;
-  chrome.usb.controlTransfer(device, {
-    requestType: 'class',
-    recipient: 'interface',
-    direction: 'in',
-    request: 0x01,
-    value: 0x0300 | reportId,
-    index: interfaceNumber,
-    length: length
-  }, function(info) {
-    if (info.resultCode) {
-      callback(null);
-      return;
-    }
-    callback(new Uint8Array(info.data));
-  });
-};
-
-function setFeatureReport(device, deviceDesc, reportId, data, callback) {
-  var interfaceNumber = deviceDesc.configurations[0].interfaces[0].interfaceNumber;
-  chrome.usb.controlTransfer(device, {
-    requestType: 'class',
-    recipient: 'interface',
-    direction: 'out',
-    request: 0x09,
-    value: 0x0300 | reportId,
-    index: interfaceNumber,
-    data: data.buffer
-  }, function(info) {
-    if (info.resultCode) {
-      callback(false);
-      return;
-    }
-    callback(true);
-  });
-};
-
-
-function getSensorConfig(device, deviceDesc, callback) {
-  getFeatureReport(device, deviceDesc, 2, 8, callback);
-};
-
-function setSensorConfig(device, deviceDesc, data, callback) {
-  setFeatureReport(device, deviceDesc, 2, data, callback);
-};
-
-
-function setSensorKeepAlive(device, deviceDesc, intervalMs, callback) {
-  var data = new Uint8Array(4);
-  data[0] = 0;
-  data[1] = 0;
-  data[2] = intervalMs & 0xFF;
-  data[3] = intervalMs >> 8;
-  setFeatureReport(device, deviceDesc, 8, data, callback);
-};
-
-
-
-function queryDevice(device) {
-  ioctl_read(device, 'standard', 0, 0, 0, 2, function(data) {
-    console.log('status:', data);
-  });
-
-  ioctl_read(device, 'standard', 8, 0, 0, 1, function(data) {
-    console.log('config:', data);
-  });
-
-  chrome.usb.resetDevice(device, function(info) {
-    DeviceDescriptor.get(device, function(deviceDesc) {
-      console.log(deviceDesc);
-      chrome.usb.controlTransfer(device, {
-        requestType: 'standard',
-        recipient: 'device',
-        direction: 'out',
-        request: 9, // SET_CONFIGURATION
-        value: deviceDesc.configurations[0].configurationValue,
-        index: 0,
-        data: new Uint8Array(0).buffer
-      }, function(info) {
-        if (info.resultCode) {
-          console.log('unable to set configuration: ', info.resultCode);
-          return;
-        }
-        console.log('config set');
-
-        global.__vr_driver__.hmdDeviceDesc = deviceDesc;
-
-        HmdInfo.get(device, deviceDesc, function(info) {
-          console.log(info);
-          global.__vr_driver__.hmdInfo = info;
-        });
-
-        getSensorConfig(device, deviceDesc, function(data) {
-          console.log('sensor config', data);
-          // setSensorConfig(device, deviceDesc, data, function() {
-          // });
-        });
-
-        SensorRange.get(device, deviceDesc, function(sensorRange) {
-          console.log(sensorRange);
-        });
-
-        setSensorKeepAlive(device, deviceDesc, 10 * 1000, function(error) {
-          console.log('keep alive set', error);
-        });
-
-        // get input report descriptor
-        var interfaceNumber = deviceDesc.configurations[0].interfaces[0].interfaceNumber;
-        var reportLength = deviceDesc.configurations[0].interfaces[0].hidDescriptor.descriptorLength;
-        chrome.usb.controlTransfer(device, {
-          requestType: 'standard',
-          recipient: 'interface',
-          direction: 'in',
-          request: 0x06,
-          value: 0x2200,
-          index: interfaceNumber,
-          length: reportLength
-        }, function(info) {
-          if (info.resultCode) {
-            console.log('get report descriptor failed', info.resultCode);
-            return;
-          }
-          var data = new Uint8Array(info.data);
-          var reportDesc = new HidReportDescriptor(data);
-          console.log(reportDesc);
-
-          startInputPump(device, deviceDesc, reportDesc);
-        });
-      });
-    });
-  });
-};
-
-var lastKeepAliveTime = 0;
 
 var HidReportDescriptor = function(data) {
   function readData(itemSize, data, o) {
@@ -698,43 +1206,284 @@ var HidReportDescriptor = function(data) {
     report.totalSize = totalSize;
   }
 };
+HidReportDescriptor.get = function(deviceHandle, deviceDesc, callback) {
+  // TODO(benvanik): accept as an argument?
+  var configInterface = deviceDesc.configurations[0].interfaces[0];
+  var interfaceNumber = configInterface.interfaceNumber;
+  var reportLength = configInterface.hidDescriptor.descriptorLength;
+  chrome.usb.controlTransfer(deviceHandle, {
+    requestType: 'standard',
+    recipient: 'interface',
+    direction: 'in',
+    request: 0x06,
+    value: 0x2200,
+    index: interfaceNumber,
+    length: reportLength
+  }, function(info) {
+    if (info.resultCode) {
+      var e = new Error('Error getting HID report descriptor: ' +
+          info.resultCode);
+      e.code = info.resultCode;
+      callback(null, e);
+      return;
+    }
+    var data = new Uint8Array(info.data);
+    var reportDesc = new HidReportDescriptor(data);
+    callback(reportDesc, undefined);
+  });
+};
 
+
+var HmdInfo = function(data) {
+  var o = 0;
+  this.commandId = data[o + 1] | (data[o + 2] << 8);
+  this.distortionType = data[o + 3];
+  this.resolutionHorz = decodeUint16(data, o + 4);
+  this.resolutionVert = decodeUint16(data, o + 6);
+  this.screenSizeHorz = decodeUint32(data, o + 8) *  (1/1000000);
+  this.screenSizeVert = decodeUint32(data, o + 12) * (1/1000000);
+  this.screenCenterVert = decodeUint32(data, o + 16) * (1/1000000);
+  this.lensSeparation = decodeUint32(data, o + 20) * (1/1000000);
+  this.eyeToScreenDistance = new Float32Array([
+    decodeUint32(data, o + 24) * (1/1000000),
+    decodeUint32(data, o + 28) * (1/1000000)
+  ]);
+  this.distortionK = new Float32Array([
+    decodeFloat32(data, o + 32),
+    decodeFloat32(data, o + 36),
+    decodeFloat32(data, o + 40),
+    decodeFloat32(data, o + 44),
+    decodeFloat32(data, o + 48),
+    decodeFloat32(data, o + 52)
+  ]);
+};
+HmdInfo.get = function(deviceHandle, deviceDesc, callback) {
+  getHidFeatureReport(deviceHandle, deviceDesc, 9, 56,
+      function(data, opt_error) {
+        if (data) {
+          callback(new HmdInfo(data), undefined);
+        } else {
+          callback(null, opt_error);
+        }
+      });
+};
+
+var SensorRange = function(data) {
+  var o = 0;
+  this.commandId = data[o + 1] | (data[o + 2] << 8);
+  this.accelScale = data[o + 3];
+  this.gyroScale = decodeUint16(data, o + 4);
+  this.magScale = decodeUint16(data, o + 6);
+};
+SensorRange.get = function(deviceHandle, deviceDesc, callback) {
+  getHidFeatureReport(deviceHandle, deviceDesc, 4, 8,
+      function(data, opt_error) {
+        if (data) {
+          callback(new SensorRange(data), undefined);
+        } else {
+          callback(null, opt_error);
+        }
+      });
+};
+
+function getSensorConfig(device, deviceDesc, callback) {
+  getHidFeatureReport(device, deviceDesc, 2, 8, callback);
+};
+
+function setSensorConfig(device, deviceDesc, data, callback) {
+  setHidFeatureReport(device, deviceDesc, 2, data, callback);
+};
+
+function setSensorKeepAlive(device, deviceDesc, intervalMs, callback) {
+  var data = new Uint8Array(4);
+  data[0] = 0;
+  data[1] = 0;
+  data[2] = intervalMs & 0xFF;
+  data[3] = intervalMs >> 8;
+  setHidFeatureReport(device, deviceDesc, 8, data, callback);
+};
+
+
+
+
+// TODO(benvanik): cleanup
+var vec3f = {};
+vec3f.copy = function(out, a) {
+  out[0] = a[0];
+  out[1] = a[1];
+  out[2] = a[2];
+};
+vec3f.length = function(a) {
+  return Math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+};
+vec3f.scale = function(out, a, b) {
+  out[0] = a[0] * b;
+  out[1] = a[1] * b;
+  out[2] = a[2] * b;
+};
+vec3f.normalize = function(out, a) {
+  var length = a[0] * a[0] + a[1] * a[1] + a[2] * a[2];
+  if (length > 0) {
+    length = 1 / Math.sqrt(length);
+    out[0] = a[0] * length;
+    out[1] = a[1] * length;
+    out[2] = a[2] * length;
+  }
+};
+vec3f.dot = function(a, b) {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+};
+vec3f.angle = function(a, b) {
+  return Math.acos(vec3f.dot(a, b) / (vec3f.length(a) * vec3f.length(b)));
+};
+vec3f.transformQuat = function(out, a, q) {
+  var x = a[0], y = a[1], z = a[2];
+  var qx = q[0], qy = q[1], qz = q[2], qw = q[3];
+  var ix = qw * x + qy * z - qz * y;
+  var iy = qw * y + qz * x - qx * z;
+  var iz = qw * z + qx * y - qy * x;
+  var iw = -qx * x - qy * y - qz * z;
+  out[0] = ix * qw + iw * -qx + iy * -qz - iz * -qy;
+  out[1] = iy * qw + iw * -qy + iz * -qx - ix * -qz;
+  out[2] = iz * qw + iw * -qz + ix * -qy - iy * -qx;
+};
+var quatf = {};
+quatf.set = function(out, x, y, z, w) {
+  out[0] = x;
+  out[1] = y;
+  out[2] = z;
+  out[3] = w;
+};
+quatf.identity = function(out) {
+  out[0] = out[1] = out[2] = 0;
+  out[3] = 1;
+};
+quatf.copy = function(out, a) {
+  out[0] = a[0];
+  out[1] = a[1];
+  out[2] = a[2];
+  out[3] = a[3];
+};
+quatf.setAxisAngle = function(out, axis, rad) {
+  rad = rad * 0.5;
+  var s = Math.sin(rad);
+  out[0] = s * axis[0];
+  out[1] = s * axis[1];
+  out[2] = s * axis[2];
+  out[3] = Math.cos(rad);
+};
+quatf.multiply = function(out, a, b) {
+  var ax = a[0], ay = a[1], az = a[2], aw = a[3];
+  var bx = b[0], by = b[1], bz = b[2], bw = b[3];
+  out[0] = ax * bw + aw * bx + ay * bz - az * by;
+  out[1] = ay * bw + aw * by + az * bx - ax * bz;
+  out[2] = az * bw + aw * bz + ax * by - ay * bx;
+  out[3] = aw * bw - ax * bx - ay * by - az * bz;
+};
+quatf.normalize = function(out, a) {
+  var length = a[0] * a[0] + a[1] * a[1] + a[2] * a[2] + a[3] * a[3];
+  if (length > 0) {
+    length = 1 / Math.sqrt(length);
+    out[0] = a[0] * length;
+    out[1] = a[1] * length;
+    out[2] = a[2] * length;
+    out[3] = a[3] * length;
+  }
+};
+
+
+
+/**
+ * Sensor value filter.
+ * @param {number} size History size.
+ * @constructor
+ */
 var SensorFilter = function(size) {
-  this.LastIdx = -1;
-  this.Size = size;
-  this.Elements = new Float32Array(size * 3);
+  /**
+   * Last index used.
+   * @type {number}
+   * @private
+   */
+  this.lastIndex_ = -1;
+
+  /**
+   * Number of history entries.
+   * @type {number}
+   * @private
+   */
+  this.size_ = size;
+
+  /**
+   * A list of all history entries, each one 3 elements of XYZ.
+   * @type {!Float32Array}
+   * @private
+   */
+  this.elements_ = new Float32Array(size * 3);
+
+  /**
+   * Scratch vec3 for temp math.
+   * @type {!Float32Array}
+   * @private
+   */
+  this.tempVec3_ = new Float32Array(3);
 };
+
+
+/**
+ * Adds an element to the sensor filter history.
+ * @param {!Float32Array} v Vector element.
+ */
 SensorFilter.prototype.addElement = function(v) {
-  if (this.LastIdx == this.Size - 1) {
-    this.LastIdx = 0;
+  if (this.lastIndex_ == this.size_ - 1) {
+    this.lastIndex_ = 0;
   } else {
-    this.LastIdx++;
+    this.lastIndex_++;
   }
-  this.Elements[this.LastIdx * 3 + 0] = v[0];
-  this.Elements[this.LastIdx * 3 + 1] = v[1];
-  this.Elements[this.LastIdx * 3 + 2] = v[2];
+  this.elements_[this.lastIndex_ * 3 + 0] = v[0];
+  this.elements_[this.lastIndex_ * 3 + 1] = v[1];
+  this.elements_[this.lastIndex_ * 3 + 2] = v[2];
 };
+
+
+/**
+ * Gets a previous history value relative to the current index.
+ * @param {number} i Delta from the current index.
+ * @param {!Float32Array} out Output vector value.
+ */
 SensorFilter.prototype.getPrev = function(i, out) {
-  var idx = (this.LastIdx - i) % this.Size;
+  var idx = (this.lastIndex_ - i) % this.size_;
   if (idx < 0) {
-    idx += this.Size;
+    idx += this.size_;
   }
-  out[0] = this.Elements[idx * 3 + 0];
-  out[1] = this.Elements[idx * 3 + 1];
-  out[2] = this.Elements[idx * 3 + 2];
+  out[0] = this.elements_[idx * 3 + 0];
+  out[1] = this.elements_[idx * 3 + 1];
+  out[2] = this.elements_[idx * 3 + 2];
 };
+
+
+/**
+ * Gets the mean of the sensor value.
+ * @param {!Float32Array} out Output vector value.
+ */
 SensorFilter.prototype.getMean = function(out) {
   out[0] = out[1] = out[2] = 0;
-  for (var n = 0; n < this.Size; n++) {
-    out[0] += this.Elements[n * 3 + 0];
-    out[1] += this.Elements[n * 3 + 1];
-    out[2] += this.Elements[n * 3 + 2];
+  for (var n = 0; n < this.size_; n++) {
+    out[0] += this.elements_[n * 3 + 0];
+    out[1] += this.elements_[n * 3 + 1];
+    out[2] += this.elements_[n * 3 + 2];
   }
-  out[0] /= this.Size;
-  out[1] /= this.Size;
-  out[2] /= this.Size;
+  out[0] /= this.size_;
+  out[1] /= this.size_;
+  out[2] /= this.size_;
 };
+
+
+/**
+ * Magic.
+ * @param {!Float32Array} out Output vector value.
+ */
 SensorFilter.prototype.getSavitzkyGolaySmooth8 = function(out) {
+  var tempVec3 = this.tempVec3_;
   this.getPrev(0, tempVec3);
   out[0] += tempVec3[0] * 0.41667;
   out[1] += tempVec3[1] * 0.41667;
@@ -765,7 +1514,15 @@ SensorFilter.prototype.getSavitzkyGolaySmooth8 = function(out) {
   out[2] -= tempVec3[2] * 0.1667;
 };
 
+
+
+/**
+ * Sensor fusion utility.
+ * @constructor
+ */
 var SensorFusion = function() {
+  // TODO(benvanik): remove unused/etc
+  // TODO(benvanik): cleanup
   this.Q = new Float32Array([0, 0, 0, 1]);
   this.A = new Float32Array(3);
   this.AngV = new Float32Array(3);
@@ -787,32 +1544,38 @@ var SensorFusion = function() {
   this.TiltCondCount = 0;
   this.TiltErrorAngle = 0;
   this.TiltErrorAxis = new Float32Array([0, 1, 0]);
+
+  /**
+   * Scratch quaternion for temp math.
+   * @type {Float32Array}
+   */
+  this.tempQuat_ = new Float32Array(4);
 };
-var tempQuat0 = new Float32Array(4);
-var tempQuat1 = new Float32Array(4);
-var tempVec3 = new Float32Array(3);
-vec3.angle = function(a, b) {
-  return Math.acos(vec3.dot(a, b) / (vec3.length(a) * vec3.length(b)));
-};
+
+
+/**
+ * Handles incoming sensor data from the device.
+ * @param {!Object} sensors Sensor data.
+ */
 SensorFusion.prototype.handleSensorData = function(sensors) {
   var deltaT = sensors.timeDelta;
   var angVel = sensors.rotationRate;
   var rawAccel = sensors.acceleration;
   var mag = sensors.magneticField;
 
-  vec3.copy(this.AngV, sensors.rotationRate);
+  vec3f.copy(this.AngV, sensors.rotationRate);
   this.AngV[1] *= this.YawMult;
   this.A = rawAccel;
 
-  vec3.copy(this.RawMag, mag);
+  vec3f.copy(this.RawMag, mag);
   // if has mag cal, mult mag matrix
-  vec3.copy(this.Mag, mag);
+  vec3f.copy(this.Mag, mag);
 
-  var angVelLength = vec3.length(angVel);
-  var accLength = vec3.length(rawAccel);
+  var angVelLength = vec3f.length(angVel);
+  var accLength = vec3f.length(rawAccel);
 
   var accWorld = new Float32Array(3);
-  vec3.transformQuat(accWorld, rawAccel, this.Q);
+  vec3f.transformQuat(accWorld, rawAccel, this.Q);
 
   this.Stage++;
   var currentTime = this.State * deltaT;
@@ -823,7 +1586,7 @@ SensorFusion.prototype.handleSensorData = function(sensors) {
 
   if (angVelLength > 0) {
     var rotAxis = new Float32Array(3);
-    vec3.scale(rotAxis, angVel, 1 / angVelLength);
+    vec3f.scale(rotAxis, angVel, 1 / angVelLength);
     var halfRotAngle = angVelLength * deltaT * 0.5;
     var sinHRA = Math.sin(halfRotAngle);
     var deltaQ = new Float32Array(4);
@@ -832,28 +1595,28 @@ SensorFusion.prototype.handleSensorData = function(sensors) {
     deltaQ[2] = rotAxis[2] * sinHRA;
     deltaQ[3] = Math.cos(halfRotAngle);
 
-    quat.multiply(this.Q, this.Q, deltaQ);
+    quatf.multiply(this.Q, this.Q, deltaQ);
 
-    quat.copy(this.QP, this.Q);
+    quatf.copy(this.QP, this.Q);
     if (this.EnablePrediction) {
       var angVelF = new Float32Array(3);
       this.FAngV.getSavitzkyGolaySmooth8(angVelF);
-      var angVelFL = vec3.length(angVelF);
+      var angVelFL = vec3f.length(angVelF);
       if (angVelFL > 0.001) {
         var rotAxisP = angVelF;
-        vec3.scale(rotAxisP, angVelF, 1 / angVelFL);
+        vec3f.scale(rotAxisP, angVelF, 1 / angVelFL);
         var halfRotAngleP = angVelFL * this.PredictionDT * 0.5;
         var sinaHRAP = Math.sin(halfRotAngleP);
-        quat.set(tempQuat0,
+        quatf.set(this.tempQuat_,
             rotAxisP[0] * sinaHRAP, rotAxisP[1] * sinaHRAP,
             rotAxisP[2] * sinaHRAP, Math.cos(halfRotAngleP));
-        quat.multiply(this.QP, this.Q, tempQuat0);
+        quatf.multiply(this.QP, this.Q, this.tempQuat_);
       }
     }
   }
 
   if (this.Stage % 5000 == 0) {
-    quat.normalize(this.Q, this.Q);
+    quatf.normalize(this.Q, this.Q);
   }
 
   if (this.EnableGravity) {
@@ -881,9 +1644,9 @@ SensorFusion.prototype.handleSensorData = function(sensors) {
       tiltAxis[0] = xzAcc[2];
       tiltAxis[1] = 0;
       tiltAxis[2] = -xzAcc[0];
-      vec3.normalize(tiltAxis, tiltAxis);
+      vec3f.normalize(tiltAxis, tiltAxis);
       var yUp = new Float32Array([0, 1, 0]);
-      var tiltAngle = vec3.angle(yUp, accWMean);
+      var tiltAngle = vec3f.angle(yUp, accWMean);
       if (tiltAngle > maxTiltError) {
         this.TiltErrorAngle = tiltAngle;
         this.TiltErrorAxis = tiltAxis;
@@ -892,190 +1655,33 @@ SensorFusion.prototype.handleSensorData = function(sensors) {
 
     if (this.TiltErrorAngle > minTiltError) {
       if (this.TiltErrorAngle > 0.4 && this.Stage < 2000) {
-        quat.setAxisAngle(tempQuat0, this.TiltErrorAxis, -this.TiltErrorAngle);
-        quat.multiply(this.Q, tempQuat0, this.Q);
+        quatf.setAxisAngle(this.tempQuat_, this.TiltErrorAxis, -this.TiltErrorAngle);
+        quatf.multiply(this.Q, this.tempQuat_, this.Q);
         this.TiltErrorAngle = 0;
       } else {
         var deltaTiltAngle = -this.Gain * this.TiltErrorAngle * 0.005 * (5 * angVelLength + 1);
-        quat.setAxisAngle(tempQuat0, this.TiltErrorAxis, deltaTiltAngle);
-        quat.multiply(this.Q, tempQuat0, this.Q);
+        quatf.setAxisAngle(this.tempQuat_, this.TiltErrorAxis, deltaTiltAngle);
+        quatf.multiply(this.Q, this.tempQuat_, this.Q);
         this.TiltErrorAngle += deltaTiltAngle;
       }
     }
   }
 };
+
+
+/**
+ * Resets the current orientation to the identity.
+ */
 SensorFusion.prototype.reset = function() {
-  quat.identity(this.Q);
-};
-
-var sensorFusion = new SensorFusion();
-
-
-function startInputPump(device, deviceDesc, reportDesc) {
-  var interfaceNumber = deviceDesc.configurations[0].interfaces[0].interfaceNumber;
-  chrome.usb.claimInterface(device, interfaceNumber, function() {
-    console.log('interface claimed');
-
-    var interfaceNumber = deviceDesc.configurations[0].interfaces[0].interfaceNumber;
-    var endpointAddress = deviceDesc.configurations[0].interfaces[0].endpoints[0].endpointAddress;
-    var inputReport = reportDesc.root.application.logical.reports[0];
-    var reportSize = inputReport.totalSize + 1;
-
-    var lastTimestamp = 0;
-    var lastSampleCount = 0;
-    var lastAcceleration = new Float32Array(3);
-    var lastRotationRate = new Float32Array(3);
-    var lastMagneticField = new Float32Array(3);
-    var lastTemperature = 0;
-
-    var TIME_UNIT = 1 / 1000;
-
-    function handleSensorData(sensors) {
-      sensorFusion.handleSensorData(sensors);
-    };
-
-    pumpInput(device, endpointAddress, reportSize, function(data) {
-      //console.log('incoming data', !!data);
-
-      if (!data) {
-        chrome.usb.releaseInterface(device, interfaceNumber, function() {});
-        return false;
-      }
-
-      function decodeSensorData(data, o) {
-        var result = new Int32Array(3);
-        result[0] = (data[o + 0] << 13) | (data[o + 1] << 5) | ((data[o + 2] & 0xF8) >> 3);
-        result[1] = ((data[o + 2] & 0x07) << 18) | (data[o + 3] << 10) | (data[o + 4] << 2) |
-                    ((data[o + 5] & 0xC0) >> 6);
-        result[2] = ((data[o + 5] & 0x3F) << 15) | (data[o + 6] << 7) | (data[o + 7] >> 1);
-        result[0] = ((result[0] << 11) >> 11);
-        result[1] = ((result[1] << 11) >> 11);
-        result[2] = ((result[2] << 11) >> 11);
-        return result;
-      };
-      var AS = 1;
-      var ES = 10;
-      function accelFromBodyFrameUpdate(message, n) {
-        return new Float32Array([
-          message.samples[n].accel[0] * 0.0001 * AS,
-          message.samples[n].accel[1] * 0.0001 * AS,
-          message.samples[n].accel[2] * 0.0001 * AS
-        ]);
-      };
-      function eulerFromBodyFrameUpdate(message, n) {
-        return new Float32Array([
-          message.samples[n].gyro[0] * 0.0001 * ES,
-          message.samples[n].gyro[1] * 0.0001 * ES,
-          message.samples[n].gyro[2] * 0.0001 * ES
-        ]);
-      };
-      function magFromBodyFrameUpdate(message) {
-        // note the swap
-        return new Float32Array([
-          message.magX * 0.0001,
-          message.magZ * 0.0001,
-          message.magY * 0.0001
-        ]);
-      };
-
-      var o = 0;
-      // 0 = record id?
-      var message = {
-        sampleCount: data[o + 1],
-        timestamp: decodeUint16(data, o + 2),
-        lastCommandId: decodeUint16(data, o + 4),
-        temperature: decodeInt16(data, o + 6),
-        samples: [],
-        magX: decodeInt16(data, o + 56),
-        magY: decodeInt16(data, o + 58),
-        magZ: decodeInt16(data, o + 60)
-      };
-      var iterationCount = (message.sampleCount > 2) ? 3 : message.sampleCount;
-      for (var n = 0; n < iterationCount; n++) {
-        message.samples.push({
-          accel: decodeSensorData(data, o + 8 + 16 * n),
-          gyro: decodeSensorData(data, o + 16 + 16 * n)
-        });
-      }
-
-      if (lastTimestamp) {
-        var timestampDelta = (message.timestamp < lastTimestamp) ?
-            (message.timestamp + 0x10000) - lastTimestamp :
-            message.timestamp - lastTimestamp;
-        if (timestampDelta > lastSampleCount && timestampDelta <= 254) {
-          handleSensorData({
-            timeDelta: (timestampDelta - lastSampleCount) * TIME_UNIT,
-            acceleration: lastAcceleration,
-            rotationRate: lastRotationRate,
-            magneticField: lastMagneticField,
-            temperature: lastTemperature
-          });
-        }
-      }
-      lastTimestamp = message.timestamp;
-      lastSampleCount = message.sampleCount;
-
-      var sensors = null;
-      for (var n = 0; n < iterationCount; n++) {
-        sensors = {
-          timeDelta: TIME_UNIT,
-          acceleration: accelFromBodyFrameUpdate(message, n),
-          rotationRate: eulerFromBodyFrameUpdate(message, n),
-          magneticField: magFromBodyFrameUpdate(message),
-          temperature: message.temperature * 0.01
-        };
-        handleSensorData(sensors);
-        sensors.timeDelta = TIME_UNIT;
-      }
-      for (var n = 0; n < 3; n++) {
-        lastAcceleration[n] = sensors.acceleration[n];
-        lastRotationRate[n] = sensors.rotationRate[n];
-        lastMagneticField[n] = sensors.magneticField[n];
-      }
-      lastTemperature = sensors.temperature;
-
-      // console.log('time since last', Date.now() - lastKeepAliveTime);
-      if (Date.now() - lastKeepAliveTime > 5 * 1000) {
-        console.log('keep alive ping');
-        setSensorKeepAlive(device, deviceDesc, 10 * 1000, function(error) {
-        });
-        lastKeepAliveTime = Date.now();
-      }
-
-      return true;
-    });
-  });
-};
-
-function pumpInput(device, endpointAddress, reportSize, callback) {
-  chrome.usb.interruptTransfer(device, {
-    direction: 'in',
-    endpoint: endpointAddress,
-    length: reportSize
-  }, function(info) {
-    if (info.resultCode) {
-      console.log('interrupt fail');
-      callback(null);
-      return;
-    }
-    var data = new Uint8Array(info.data);
-    if (callback(data)) {
-      pumpInput(device, endpointAddress, reportSize, callback);
-    }
-  });
+  quatf.identity(this.Q);
 };
 
 
-global.__vr_driver__ = {
-  hmdDeviceDesc: null,
-  hmdInfo: null,
-  rotation: sensorFusion.Q,
-  reset: function() {
-    sensorFusion.reset();
-  },
-  dispose: function() {
-    // TODO: close device/etc.
-  }
-};
+/**
+ * Shared driver instance.
+ * @type {!OculusDriver}
+ * @global
+ */
+global.__vr_driver__ = new OculusDriver();
 
 })(window);
