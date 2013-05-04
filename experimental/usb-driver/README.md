@@ -1,6 +1,8 @@
 # Experimental Oculus Rift USB Driver
 
-This implements a simple, hacky Oculus Rift dev kit driver in pure Javascript using the chrome.usb APIs. It only runs on Chrome, and only within a Packaged App.
+This implements a simple, hacky Oculus Rift dev kit driver in pure Javascript using the [chrome.usb](http://developer.chrome.com/trunk/apps/usb.html) APIs. It only runs on Chrome, and only within a Packaged App.
+
+If Mozilla completes their implementation of [WebUSB](https://bugzilla.mozilla.org/show_bug.cgi?id=674718) then this could be made to run there as well.
 
 ## Preparing the Device
 
