@@ -22,11 +22,11 @@ A codeless kernel extension is required to disable the system HID drivers from t
 
 Installing:
 
-* Execute `sudo ./experimental/usb-drivers/hacks/install-usb-hack.sh`
+* Execute `sudo ./experimental/usb-driver/hacks/install-usb-hack.sh`
 
 Uninstalling:
 
-* Execute `sudo ./experimental/usb-drivers/hacks/uninstall-usb-hack.sh`
+* Execute `sudo ./experimental/usb-driver/hacks/uninstall-usb-hack.sh`
 
 ### Linux
 

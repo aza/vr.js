@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 # Script must be run as root.
 if [ "$(id -u)" != "0" ]; then
    echo "This script must be run as root; try sudo!" 1>&2
@@ -15,8 +17,8 @@ if [ "$OS" == "Linux" ]; then
   # Linux
   echo "Detected Linux, will attempt to install udev rule."
 
-  echo "Copying 40-oculus-hack.rules to /lib/udev/rules.d/..."
-  cp 40-oculus-hack.rules /lib/udev/rules.d/
+  echo "Copying 40-oculus.rules to /lib/udev/rules.d/..."
+  cp 40-oculus.rules /lib/udev/rules.d/
 
   echo "Restarting the udev service..."
   service udev restart

@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 # Script must be run as root.
 if [ "$(id -u)" != "0" ]; then
    echo "This script must be run as root; try sudo!" 1>&2
