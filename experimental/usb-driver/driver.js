@@ -287,6 +287,15 @@ var OculusDevice = function(deviceHandle, deviceDesc, reportDesc, hmdInfo) {
   this.pumping_ = false;
 
   /**
+   * Number of outstanding pump reads.
+   * To reduce latency we issue several reads at a time so that we don't have
+   * to way for the full round trip on a read-request-complete cycle.
+   * @type {number}
+   * @private
+   */
+  this.outstandingReadCount_ = 0;
+
+  /**
    * @type {number}
    * @private
    */
@@ -417,6 +426,16 @@ OculusDevice.KEEP_ALIVE_INTERVAL_MS_ = 5 * 1000;
 
 
 /**
+ * The number of outstanding reads to maintain during pumping.
+ * The higher the number the better, until failures happen...
+ * @type {number}
+ * @const
+ * @private
+ */
+OculusDevice.MAX_OUTSTANDING_READS_ = 100;
+
+
+/**
  * Begins the input pump.
  * This will claim the interface and hopefully start receiving data.
  * @private
@@ -455,11 +474,13 @@ OculusDevice.prototype.beginInputPump_ = function() {
     var inputReport = self.reportDesc_.root.application.logical.reports[0];
     var reportSize = inputReport.totalSize + 1;
     function pumpInput() {
+      ++self.outstandingReadCount_;
       chrome.usb.interruptTransfer(self.handle_, {
         direction: 'in',
         endpoint: endpointAddress,
         length: reportSize
       }, function(info) {
+        --self.outstandingReadCount_;
         if (info.resultCode) {
           var e = new Error('Error during interrupt transfer: ' +
               info.resultCode);
@@ -473,7 +494,9 @@ OculusDevice.prototype.beginInputPump_ = function() {
         }
       });
     };
-    pumpInput();
+    while (self.outstandingReadCount_ < OculusDevice.MAX_OUTSTANDING_READS_) {
+      pumpInput();
+    }
   });
 };
 
@@ -562,12 +585,10 @@ OculusDevice.prototype.inputPump_ = function(data, opt_error) {
     out[2] = tempInt32[2] * 0.0001;
   };
   function eulerFromSensorData(data, o, out) {
-    // TODO(benvanik): figure out why I have to scale this by 10.
-    var ES = 10;
     decodeSensorData(data, o, tempInt32);
-    out[0] = tempInt32[0] * 0.0001 * ES;
-    out[1] = tempInt32[1] * 0.0001 * ES;
-    out[2] = tempInt32[2] * 0.0001 * ES;
+    out[0] = tempInt32[0] * 0.0001;
+    out[1] = tempInt32[1] * 0.0001;
+    out[2] = tempInt32[2] * 0.0001;
   };
 
   // Read all sensor data.
