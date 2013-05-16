@@ -58,10 +58,6 @@ The Chrome API's only expose raw USB devices and there is no API for HID devices
 
 ## Bugs/Known Issues
 
-### Driver Bugs
-
-* There's some weird drift that's happening if you move the HMD around a lot. The official SDK lacks this drift. If you can figure out what math I'm doing wrong please help!
-
 ### Missing Features
 
 * I'm not currently using the magnetometer data to correct for yaw drift (as added in the official 2.1 SDK).
