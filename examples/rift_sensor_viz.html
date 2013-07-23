@@ -35,14 +35,14 @@
       renderer.setSize(canvasWidth, canvasHeight);
       document.body.appendChild(renderer.domElement);
 
-      var pointLight = new THREE.PointLight(0xFFFFFF);
+      var pointLight = new THREE.PointLight(0xFF99FF);
       pointLight.position.x = 10;
       pointLight.position.y = 50;
       pointLight.position.z = 130;
       scene.add(pointLight);
 
       var defaultMaterial = new THREE.MeshLambertMaterial({
-        color: 0xCC0000
+        color: 0xCC00CC
       });
 
       function createPointer() {

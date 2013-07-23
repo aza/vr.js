@@ -43,7 +43,7 @@
 		<div id="info">IPD: <span id='ipd'>0</span> (+o/-p)</div>
 
 		<script>
-		(function() {
+		
 			var camera, scene, renderer;
 			var geometry, material, mesh;
 			var controls, time = Date.now();
@@ -144,8 +144,8 @@
 				controls = new THREE.OculusRiftControls( camera );
 				scene.add( controls.getObject() );
 
-				// var cameraHelper = new THREE.CameraHelper(camera);
-				// scene.add(cameraHelper);
+				//var cameraHelper = new THREE.CameraHelper(camera);
+				//scene.add(cameraHelper);
 
 				ray = new THREE.Raycaster();
 				ray.ray.direction.set( 0, -1, 0 );
@@ -193,7 +193,7 @@
 
 				}
 
-				for ( var i = 0; i < 250; i ++ ) {
+				for ( var i = 0; i < 1000; i ++ ) {
 
 					material = new THREE.MeshPhongMaterial( { specular: 0xffffff, shading: THREE.FlatShading, vertexColors: THREE.VertexColors } );
 
@@ -207,9 +207,8 @@
 
 					objects.push( mesh );
 
-				}
 
-				//
+				}
 
 				renderer = new THREE.WebGLRenderer({
 					devicePixelRatio: 1,
@@ -269,6 +268,8 @@
 			function animate() {
 				vr.requestAnimationFrame(animate);
 
+				var time = Date.now() * .001
+
 				controls.isOnObject( false );
 
 				ray.ray.origin.copy( controls.getObject().position );
@@ -282,6 +283,13 @@
 					}
 				}
 
+				for( var i=0; i<objects.length; i++){
+
+					objects[i].position.y += Math.sin(time+i/10000)
+					objects[i].position.x += Math.cos(time+i/7000)
+					objects[i].position.z += Math.cos(time+i/3000+.3)
+				}
+
 				// Poll VR, if it's ready.
 				var polled = vr.pollState(vrstate);
 				controls.update( Date.now() - time, polled ? vrstate : null );
@@ -291,7 +299,7 @@
 
 				time = Date.now();
 			}
-		})();
+		
 		</script>
 	</body>
 </html>
